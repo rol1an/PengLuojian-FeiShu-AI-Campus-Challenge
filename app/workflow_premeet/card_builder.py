@@ -1,4 +1,8 @@
+from datetime import timezone, timedelta
+
 from app.models import CalendarEvent, WikiDoc
+
+_CST = timezone(timedelta(hours=8))
 
 
 def build_knowledge_card(event: CalendarEvent, docs: list[WikiDoc]) -> dict:
@@ -26,7 +30,7 @@ def build_knowledge_card(event: CalendarEvent, docs: list[WikiDoc]) -> dict:
         if i < len(docs):
             doc_elements.append({"tag": "hr"})
 
-    start_str = event.start_time.strftime("%H:%M")
+    start_str = event.start_time.astimezone(_CST).strftime("%H:%M")
 
     card = {
         "config": {"wide_screen_mode": True},
@@ -68,7 +72,7 @@ def build_knowledge_card(event: CalendarEvent, docs: list[WikiDoc]) -> dict:
 
 def build_no_docs_card(event: CalendarEvent) -> dict:
     """Fallback card when wiki search returns nothing."""
-    start_str = event.start_time.strftime("%H:%M")
+    start_str = event.start_time.astimezone(_CST).strftime("%H:%M")
     return {
         "msg_type": "interactive",
         "card": {

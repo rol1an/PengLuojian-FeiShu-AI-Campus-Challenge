@@ -33,7 +33,7 @@ async def get_upcoming_events(lookahead_hours: int | None = None) -> list[Calend
     )
 
     events: list[CalendarEvent] = []
-    for item in data.get("items", []):
+    for item in data.get("data", {}).get("items", []):
         attendee_ids = await _get_attendee_open_ids(item["event_id"])
         events.append(
             CalendarEvent(
@@ -69,7 +69,7 @@ async def _get_attendee_open_ids(event_id: str) -> list[str]:
             ),
             as_identity="user",
         )
-        return [a["attendee_id"] for a in data.get("items", []) if a.get("type") == "user"]
+        return [a["user_id"] for a in data.get("data", {}).get("items", []) if a.get("type") == "user" and a.get("user_id")]
     except Exception as e:
         logger.warning("Failed to fetch attendees for event %s: %s", event_id, e)
         return []

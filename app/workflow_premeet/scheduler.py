@@ -51,7 +51,7 @@ async def _run_premeet_pipeline(event: CalendarEvent) -> None:
         keywords = await generate_keywords(event.title, event.description)
         logger.info("Keywords for '%s': %s", event.title, keywords)
 
-        docs = await search_wiki(keywords)
+        docs = await search_wiki(keywords, event.title, event.description)
         logger.info("Found %d wiki docs for '%s'", len(docs), event.title)
 
         if not event.attendee_open_ids:

@@ -95,7 +95,7 @@ async def trigger_premeet(req: PreMeetTriggerRequest) -> dict:
     )
 
     keywords = await generate_keywords(event.title, event.description)
-    docs = await search_wiki(keywords)
+    docs = await search_wiki(keywords, event.title, event.description)
 
     results: dict = {
         "keywords": keywords,
