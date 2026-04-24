@@ -1,0 +1,16 @@
+.env
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.venv/
+dist/
+build/
+.DS_Store
+
+# lark-cli tool directories
+.agents/
+.claude/
+.trae/
+skills/
+skills-lock.json
