@@ -36,6 +36,18 @@
 
 ![服务运行日志](picture_data/example3.png)
 
+### 会后：自动生成任务并分配责任人
+
+会议结束后，系统监听 `vc.meeting.end` 事件，自动拉取会议转写，提取 Action Items 并创建飞书任务，自动识别责任人、设置截止时间，并关联相关知识文档。
+
+![会后任务列表](picture_data/postmeetexample1.png)
+
+### 会后：任务详情（责任人 + 截止时间 + 知识文档）
+
+每条任务包含：来自会议的背景说明、责任人、截止日期，以及自动关联的相关知识库文档链接。
+
+![会后任务详情](picture_data/postmeetexample2.png)
+
 ## 技术架构
 
 ```
@@ -128,6 +140,18 @@ Attendees receive a structured card directly in Feishu IM, containing the meetin
 The service polls the calendar every 60 seconds and automatically triggers the full pipeline: keyword extraction → Wiki search → LLM reranking → card push.
 
 ![Service Logs](picture_data/example3.png)
+
+### Post-meeting: Auto-create Tasks with Assigned Owners
+
+After the meeting ends, the system listens for the `vc.meeting.end` event, fetches the transcript, extracts Action Items, and creates Feishu tasks — automatically identifying owners, setting due dates, and linking relevant wiki documents.
+
+![Post-meeting Task List](picture_data/postmeetexample1.png)
+
+### Post-meeting: Task Detail (Owner + Due Date + Wiki Links)
+
+Each task includes meeting context, assignee, due date, and automatically linked knowledge base documents.
+
+![Post-meeting Task Detail](picture_data/postmeetexample2.png)
 
 ## Architecture
 
