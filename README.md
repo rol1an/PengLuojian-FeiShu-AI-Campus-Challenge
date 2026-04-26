@@ -18,16 +18,21 @@
 
 ## 功能演示
 
-### 会前：自动检测日历并推送知识卡片
+### 会前：智能知识卡片推送（精华版）
 
-会议开始前 10 分钟，系统自动检测飞书日历，提取会议主题关键词，搜索知识库并通过 LLM 重排，将最相关的参考文档以交互卡片形式推送给所有参会人。
+会议开始前 10 分钟，系统自动检测飞书日历，提取关键词，搜索知识库并经 LLM 四层筛选（质量过滤 → 语义精排 → 文档富化 → 置信度判断），将最相关的参考文档以精华卡片推送给所有参会人。每篇文档包含：**与本次会的相关原因、关键结论、待确认问题**。
 
-![日历事件检测](picture_data/example1.png)
+![会前知识卡片精华版](picture_data/premeetexample1.png)
 
+### 会前：飞书消息中收到卡片
+
+参会人在飞书消息中直接收到结构化卡片，无需手动整理资料。
+
+![会前卡片消息视图](picture_data/premeetexample2.png)
 
 ### 服务运行日志
 
-服务每 60 秒轮询日历，自动触发关键词提取 → Wiki 搜索 → LLM 重排 → 卡片推送全流程。
+服务每 60 秒轮询日历，自动触发关键词提取 → Wiki 搜索 → LLM 重排 → 文档富化 → 卡片推送全流程。
 
 ![服务运行日志](picture_data/example3.png)
 
@@ -49,9 +54,10 @@
 工作流 1 · 会前推送
 飞书日历（APScheduler 轮询）
   → LLM 关键词提取
-  → 飞书 Wiki 搜索（召回候选）
-  → LLM 重排（按会议语义排序）
-  → 飞书交互卡片推送给参会人
+  → 飞书 Wiki 搜索 + 质量过滤（时效 / 类型 / 标题）
+  → LLM 语义精排（0-10 分，输出相关原因）
+  → 文档正文富化（关键结论 / 待确认问题）
+  → 置信度判断 → 精华卡片推送给参会人
 
 工作流 2 · 会后处理
 飞书 vc.meeting.end 事件（WebSocket 监听）
@@ -118,15 +124,21 @@ curl -X POST http://localhost:8080/debug/trigger-postmeet \
 
 ## Demo
 
-### Pre-meeting: Auto-detect Calendar & Push Knowledge Cards
+### Pre-meeting: Enriched Knowledge Card Push
 
-10 minutes before a meeting starts, the system automatically detects Feishu calendar events, extracts keywords from the meeting topic, searches the knowledge base, reranks results with LLM, and pushes the most relevant documents as an interactive card to all attendees.
+10 minutes before a meeting, the system detects the calendar event, extracts keywords, and runs a 4-layer pipeline (quality filter → semantic reranking → document enrichment → confidence scoring) to push a single enriched card to all attendees. Each document includes: **why it's relevant to this meeting, key conclusions, and open questions to address**.
 
-![Calendar Event Detection](picture_data/example1.png)
+![Pre-meeting Enriched Card](picture_data/premeetexample1.png)
+
+### Attendees Receive the Card in Feishu Messages
+
+Attendees receive the structured card directly in Feishu IM — no manual preparation needed.
+
+![Pre-meeting Card in Message View](picture_data/premeetexample2.png)
 
 ### Service Logs
 
-The service polls the calendar every 60 seconds and automatically triggers the full pipeline: keyword extraction → Wiki search → LLM reranking → card push.
+The service polls the calendar every 60 seconds and triggers the full pipeline: keyword extraction → Wiki search → LLM reranking → document enrichment → card push.
 
 ![Service Logs](picture_data/example3.png)
 
@@ -148,9 +160,10 @@ Each task includes meeting context, assignee, due date, and automatically linked
 Workflow 1 · Pre-meeting Push
 Feishu Calendar (APScheduler polling)
   → LLM keyword extraction
-  → Feishu Wiki search (candidate retrieval)
-  → LLM reranking (semantic relevance to meeting)
-  → Push interactive card to all attendees
+  → Feishu Wiki search + quality filter (recency / type / title)
+  → LLM semantic reranking (0-10 score with relevance reason)
+  → Document enrichment (key conclusions / open questions)
+  → Confidence scoring → Push enriched card to all attendees
 
 Workflow 2 · Post-meeting Processing
 Feishu vc.meeting.end event (WebSocket listener)
