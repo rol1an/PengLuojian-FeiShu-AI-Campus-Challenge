@@ -28,7 +28,7 @@
 
 参会人在飞书消息中直接收到结构化卡片，包含会议名称、开始时间和按相关性排序的知识库文档链接列表。
 
-![知识卡片推送](picture_data/postmeetexample1.png)(picture_data/postmeetexample2.png)
+![知识卡片推送](picture_data/example2.png)
 
 ### 服务运行日志
 
