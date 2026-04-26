@@ -61,8 +61,11 @@ async def enrich_and_repush(
         else:
             enriched_any = True
 
+    from app.workflow_premeet.push_service import push_knowledge_to_participants
+
     if not enriched_any:
-        logger.info("No docs enriched; skipping enriched card push for %s", event.event_id)
+        logger.info("No docs enriched; falling back to basic card for %s", event.event_id)
+        await push_knowledge_to_participants(event, docs)
         return
 
     payload = build_enriched_knowledge_card(event, docs)

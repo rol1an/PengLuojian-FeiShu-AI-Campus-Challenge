@@ -64,12 +64,12 @@ async def _run_premeet_pipeline(event: CalendarEvent) -> None:
             logger.warning("No attendees found for event %s", event.event_id)
             return
 
-        # Push basic card immediately (Layer 4 confidence judgment inside)
-        await push_knowledge_to_participants(event, docs)
-
-        # Layer 3: async doc enrichment — does not block, re-pushes enriched card when done
+        # Layer 3 + 4: enrich first, then push single card (basic as fallback)
+        # This avoids sending two messages to the user
         if docs:
-            asyncio.create_task(enrich_and_repush(docs, event))
+            await enrich_and_repush(docs, event)
+        else:
+            await push_knowledge_to_participants(event, docs)
 
     except Exception as e:
         logger.error("Pre-meeting push pipeline failed for %s: %s", event.event_id, e)

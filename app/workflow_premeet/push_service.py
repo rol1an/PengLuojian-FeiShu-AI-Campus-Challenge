@@ -40,7 +40,7 @@ async def push_knowledge_to_participants(
     else:
         top1_score, gap, avg_score = _confidence_signals(docs)
         is_confident = (
-            top1_score >= settings.WIKI_CONFIDENCE_THRESHOLD and gap >= 1.0
+            top1_score >= settings.WIKI_CONFIDENCE_THRESHOLD and avg_score >= 5.0
         )
         if is_confident:
             payload = build_knowledge_card(event, docs)

@@ -10,6 +10,7 @@ from app.config import settings
 from app.workflow_premeet.calendar_service import get_upcoming_events
 from app.workflow_premeet.wiki_service import generate_keywords, search_wiki
 from app.workflow_premeet.push_service import push_knowledge_to_participants
+from app.workflow_premeet.doc_enricher import enrich_and_repush
 from app.workflow_premeet.scheduler import create_scheduler, _pushed_events
 from app.workflow_postmeet.event_listener import listen_for_meeting_end
 from app.workflow_postmeet.pipeline import handle_meeting_end_event, run_postmeet_pipeline_for_meeting
@@ -110,7 +111,11 @@ async def trigger_premeet(req: PreMeetTriggerRequest) -> dict:
     }
 
     if req.attendee_open_ids:
-        results["push_results"] = await push_knowledge_to_participants(event, docs)
+        if docs:
+            await enrich_and_repush(docs, event)
+            results["push_results"] = {uid: True for uid in req.attendee_open_ids}
+        else:
+            results["push_results"] = await push_knowledge_to_participants(event, docs)
 
     return results
 
