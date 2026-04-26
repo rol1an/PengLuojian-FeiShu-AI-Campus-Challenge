@@ -24,11 +24,6 @@
 
 ![日历事件检测](picture_data/example1.png)
 
-### 会后：飞书消息中收到知识卡片
-
-参会人在飞书消息中直接收到结构化卡片，包含会议名称、开始时间和按相关性排序的知识库文档链接列表。
-
-![知识卡片推送](picture_data/example2.png)
 
 ### 服务运行日志
 
@@ -128,12 +123,6 @@ curl -X POST http://localhost:8080/debug/trigger-postmeet \
 10 minutes before a meeting starts, the system automatically detects Feishu calendar events, extracts keywords from the meeting topic, searches the knowledge base, reranks results with LLM, and pushes the most relevant documents as an interactive card to all attendees.
 
 ![Calendar Event Detection](picture_data/example1.png)
-
-### Attendees Receive Cards in Feishu Messages
-
-Attendees receive a structured card directly in Feishu IM, containing the meeting name, start time, and a relevance-ranked list of knowledge base document links.
-
-![Knowledge Card Push](picture_data/example2.png)
 
 ### Service Logs
 
