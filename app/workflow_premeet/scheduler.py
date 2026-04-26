@@ -10,6 +10,7 @@ from app.models import CalendarEvent
 from app.workflow_premeet.calendar_service import get_upcoming_events
 from app.workflow_premeet.wiki_service import generate_keywords, search_wiki
 from app.workflow_premeet.push_service import push_knowledge_to_participants
+from app.workflow_premeet.doc_enricher import enrich_and_repush
 
 logger = logging.getLogger(__name__)
 
@@ -46,19 +47,30 @@ async def premeet_check_job() -> None:
 
 
 async def _run_premeet_pipeline(event: CalendarEvent) -> None:
-    """Full pipeline: keywords → wiki search → push cards."""
+    """Full pipeline: keywords → wiki search → push basic card → async enrich."""
     try:
         keywords = await generate_keywords(event.title, event.description)
         logger.info("Keywords for '%s': %s", event.title, keywords)
 
-        docs = await search_wiki(keywords, event.title, event.description)
+        docs = await search_wiki(
+            keywords,
+            event.title,
+            event.description,
+            attendee_open_ids=event.attendee_open_ids,
+        )
         logger.info("Found %d wiki docs for '%s'", len(docs), event.title)
 
         if not event.attendee_open_ids:
             logger.warning("No attendees found for event %s", event.event_id)
             return
 
+        # Push basic card immediately (Layer 4 confidence judgment inside)
         await push_knowledge_to_participants(event, docs)
+
+        # Layer 3: async doc enrichment — does not block, re-pushes enriched card when done
+        if docs:
+            asyncio.create_task(enrich_and_repush(docs, event))
+
     except Exception as e:
         logger.error("Pre-meeting push pipeline failed for %s: %s", event.event_id, e)
 

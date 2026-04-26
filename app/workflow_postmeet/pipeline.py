@@ -42,7 +42,7 @@ async def handle_meeting_end_event(event_data: dict) -> None:
     # Step 4: Create a Feishu task for each action item
     created = 0
     for item in items:
-        task_id = await create_task_for_action_item(item, meeting_title=record.title)
+        task_id = await create_task_for_action_item(item, meeting_title=record.title, meeting_end_time=record.end_time)
         if task_id:
             created += 1
 
@@ -80,7 +80,7 @@ async def run_postmeet_pipeline_for_meeting(
 
     created_ids: list[str] = []
     for item in items:
-        task_id = await create_task_for_action_item(item, meeting_title=record.title)
+        task_id = await create_task_for_action_item(item, meeting_title=record.title, meeting_end_time=record.end_time)
         if task_id:
             created_ids.append(task_id)
 

@@ -19,7 +19,13 @@ class WikiDoc:
     url: str
     space_name: str
     node_token: str
+    obj_token: str = ""
     excerpt: str = ""
+    score: float = 0.0
+    why_relevant: str = ""
+    key_conclusions: list[str] = field(default_factory=list)
+    open_questions: list[str] = field(default_factory=list)
+    anchor_url: str = ""
 
 
 @dataclass
@@ -28,6 +34,7 @@ class ActionItem:
     assignee_name: str
     assignee_open_id: str | None
     due_hint: str
+    start_hint: str
     context: str
     wiki_links: list[WikiDoc] = field(default_factory=list)
 

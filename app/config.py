@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     WIKI_SPACE_ID: str = ""
     WIKI_MAX_DOCS: int = 5
     WIKI_SEARCH_TIMEOUT: int = 15
+    WIKI_QUALITY_THRESHOLD: float = 0.3
+    WIKI_CONFIDENCE_THRESHOLD: float = 5.0
 
     # Event subscription
     EVENT_FILTER: str = r"vc\.meeting"

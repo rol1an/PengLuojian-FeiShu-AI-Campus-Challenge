@@ -13,17 +13,29 @@ Extract all action items from the provided meeting transcript or summary.
 Return ONLY a valid JSON array. Each element must have exactly these fields:
 {
   "summary": "One clear sentence describing the action (starts with a verb)",
-  "assignee_name": "Full name of the person responsible exactly as mentioned, or empty string",
-  "due_hint": "Due date or timeframe as mentioned (e.g. 'by Friday', 'next week'), or empty string",
+  "assignee_name": "Name of the person responsible (see rules below), or empty string if truly unresolvable",
+  "due_hint": "Deadline as mentioned: 'ddl在...', '...之前完成', '最晚...', 'by Friday', etc. Empty string if not mentioned.",
+  "start_hint": "Start time as mentioned: '明天开始', '下周一再...', '这件事后天...', etc. Empty string if not mentioned.",
   "context": "One sentence of relevant background from the meeting"
 }
 
-Rules:
-- Only extract real commitments and decisions, not suggestions
+## Assignee resolution rules (apply in order):
+
+1. **Explicit name**: "让小明去做" / "assigned to Alice" → that person
+2. **First-person commitment**: speaker says "我会" / "我来" / "我去" / "I will" → the speaker
+3. **Second-person directive**: speaker says "你去" / "你来" / "你要" / "you should" → the person being spoken to (infer from conversation context — who is the other active participant in that exchange?)
+4. **Third-person reference**: "他下一步" / "她负责" → named person mentioned nearby in the transcript
+5. **First-person plural "我们"**: assign to the speaker (the person who said it is most accountable)
+6. **No clear owner but clear internal team task**: assign to the speaker of that turn
+7. **Clearly external / third-party task**: "供应商的想法是..." / "客户需要..." → leave assignee_name empty
+8. **Purely organizational goal without owner**: "公司目标是..." / "下一步方向是..." → leave assignee_name empty
+
+## Other rules:
+- Only extract real commitments and decisions, not vague suggestions or observations
 - If no action items exist, return []
-- Do not invent information not present in the transcript
-- assignee_name must be the name exactly as spoken/written
-- summary must start with a verb and be concise and actionable
+- summary must start with a verb, be concise and actionable, written in the same language as the transcript
+- due_hint: only extract explicit deadline signals; do NOT infer from vague hints like "下周" alone
+- start_hint: only extract explicit start signals; "下周做" is NOT a start hint, "明天开始做" IS
 """
 
 
@@ -52,6 +64,7 @@ async def extract_action_items(transcript: str, ai_summary: str = "") -> list[Ac
                 assignee_name=item.get("assignee_name", ""),
                 assignee_open_id=None,
                 due_hint=item.get("due_hint", ""),
+                start_hint=item.get("start_hint", ""),
                 context=item.get("context", ""),
             )
             for item in items_data

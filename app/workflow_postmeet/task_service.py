@@ -1,3 +1,4 @@
+import json
 import logging
 from datetime import datetime, timezone, timedelta
 
@@ -20,7 +21,7 @@ async def resolve_assignee(name: str) -> str | None:
             name,
             as_identity="user",
         )
-        users = data.get("users", [])
+        users = data.get("data", {}).get("users", [])
         if users:
             return users[0].get("open_id")
     except Exception as e:
@@ -31,6 +32,7 @@ async def resolve_assignee(name: str) -> str | None:
 async def create_task_for_action_item(
     item: ActionItem,
     meeting_title: str,
+    meeting_end_time: datetime | None = None,
     tasklist_id: str | None = None,
 ) -> str | None:
     """
@@ -47,48 +49,72 @@ async def create_task_for_action_item(
             desc_parts.append(f"- [{doc.title}]({doc.url})")
     description = "\n".join(desc_parts)
 
-    due_date = _parse_due_hint(item.due_hint)
+    # Build start / due timestamps
+    now = datetime.now(tz=timezone.utc)
+    start_date = _parse_time_hint(item.start_hint, now) if item.start_hint else None
+    due_date = _parse_time_hint(item.due_hint, now) if item.due_hint else None
 
-    flags = [
-        "--summary",
-        item.summary,
-        "--description",
-        description,
-        "--due",
-        due_date,
-    ]
+    # Start fallback: meeting end time
+    if start_date is None:
+        start_date = (meeting_end_time or now).date()
+
+    # Build --data payload (required for start field)
+    task_data: dict = {
+        "summary": item.summary,
+        "description": description,
+        "start": {
+            "timestamp": str(int(datetime(start_date.year, start_date.month, start_date.day,
+                                          tzinfo=timezone.utc).timestamp() * 1000)),
+            "is_all_day": True,
+        },
+    }
+    if due_date is not None:
+        task_data["due"] = {
+            "timestamp": str(int(datetime(due_date.year, due_date.month, due_date.day,
+                                          tzinfo=timezone.utc).timestamp() * 1000)),
+            "is_all_day": True,
+        }
     if item.assignee_open_id:
-        flags.extend(["--assignee", item.assignee_open_id])
+        task_data["members"] = [{"id": item.assignee_open_id, "type": "user", "role": "assignee"}]
+
+    flags = ["--data", json.dumps(task_data)]
     if tasklist_id:
         flags.extend(["--tasklist-id", tasklist_id])
 
     try:
-        result = await run_lark("task", "+create", *flags, as_identity="user")
-        task_id = result.get("data", {}).get("guid") or result.get("guid")
-        logger.info("Created task '%s' → %s", item.summary[:50], task_id)
+        result = await run_lark("task", "tasks", "create", *flags, as_identity="user")
+        task_id = result.get("data", {}).get("task", {}).get("guid") or result.get("data", {}).get("guid")
+        logger.info("Created task '%s' → %s (start=%s due=%s)", item.summary[:50], task_id, start_date, due_date)
         return task_id
     except Exception as e:
         logger.error("Task creation failed for '%s': %s", item.summary[:50], e)
         return None
 
 
-def _parse_due_hint(hint: str) -> str:
-    """Convert natural language due hint to ISO date string. Falls back to N days from now."""
+def _parse_time_hint(hint: str, reference: datetime):
+    """Parse a natural language time hint to a date. Returns None if hint is empty."""
+    from datetime import date
+    if not hint or not hint.strip():
+        return None
     hint_lower = hint.lower()
-    now = datetime.now(tz=timezone.utc)
+    now = reference
 
-    if "today" in hint_lower or "eod" in hint_lower or "今天" in hint_lower:
-        due = now
+    if "today" in hint_lower or "今天" in hint_lower or "eod" in hint_lower:
+        return now.date()
     elif "tomorrow" in hint_lower or "明天" in hint_lower:
-        due = now + timedelta(days=1)
+        return (now + timedelta(days=1)).date()
+    elif "后天" in hint_lower:
+        return (now + timedelta(days=2)).date()
     elif "friday" in hint_lower or "周五" in hint_lower or "本周五" in hint_lower:
-        days_until_friday = (4 - now.weekday()) % 7
-        due = now + timedelta(days=days_until_friday or 7)
+        days = (4 - now.weekday()) % 7
+        return (now + timedelta(days=days or 7)).date()
+    elif "monday" in hint_lower or "下周一" in hint_lower:
+        days = (7 - now.weekday()) % 7 + 1
+        return (now + timedelta(days=days)).date()
     elif "next week" in hint_lower or "下周" in hint_lower:
-        due = now + timedelta(weeks=1)
+        return (now + timedelta(weeks=1)).date()
     elif "two week" in hint_lower or "2 week" in hint_lower or "两周" in hint_lower:
-        due = now + timedelta(weeks=2)
-    else:
-        due = now + timedelta(days=settings.TASK_DEFAULT_DUE_DAYS)
-
-    return due.strftime('%Y-%m-%d')
+        return (now + timedelta(weeks=2)).date()
+    elif "month" in hint_lower or "下个月" in hint_lower:
+        return (now + timedelta(days=30)).date()
+    return None

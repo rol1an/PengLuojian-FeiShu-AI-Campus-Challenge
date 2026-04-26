@@ -95,12 +95,17 @@ async def trigger_premeet(req: PreMeetTriggerRequest) -> dict:
     )
 
     keywords = await generate_keywords(event.title, event.description)
-    docs = await search_wiki(keywords, event.title, event.description)
+    docs = await search_wiki(
+        keywords,
+        event.title,
+        event.description,
+        attendee_open_ids=req.attendee_open_ids,
+    )
 
     results: dict = {
         "keywords": keywords,
         "wiki_docs_found": len(docs),
-        "docs": [{"title": d.title, "url": d.url} for d in docs],
+        "docs": [{"title": d.title, "url": d.url, "score": d.score} for d in docs],
         "push_results": {},
     }
 
