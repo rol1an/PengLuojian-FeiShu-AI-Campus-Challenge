@@ -73,7 +73,7 @@
 
 | 组件 | 技术 |
 |------|------|
-| LLM | 豆包 1.6（Volcengine Ark，OpenAI 兼容接口）|
+| LLM | 豆包 2.0（Volcengine Ark，OpenAI 兼容接口）|
 | 飞书能力 | lark-cli（日历 / IM / Wiki / 任务 / 视频会议）|
 | 服务框架 | FastAPI + APScheduler |
 | 运行环境 | Python 3.11+，uvicorn |
@@ -179,7 +179,7 @@ Feishu vc.meeting.end event (WebSocket listener)
 
 | Component | Technology |
 |-----------|-----------|
-| LLM | Doubao 1.6 (Volcengine Ark, OpenAI-compatible) |
+| LLM | Doubao 2.0 (Volcengine Ark, OpenAI-compatible) |
 | Feishu APIs | lark-cli (Calendar / IM / Wiki / Task / VC) |
 | Service | FastAPI + APScheduler |
 | Runtime | Python 3.11+, uvicorn |
