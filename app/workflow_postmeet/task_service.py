@@ -9,21 +9,75 @@ from app.models import ActionItem
 logger = logging.getLogger(__name__)
 
 
-async def resolve_assignee(name: str) -> str | None:
-    """Look up open_id by name using contact search."""
+_HONORIFICS = ("哥", "姐", "总", "老师", "同学")
+
+
+def _strip_honorific(name: str) -> str:
+    """Strip common honorific suffixes (one character)."""
+    for h in _HONORIFICS:
+        if name.endswith(h) and len(name) > 1:
+            return name[:-len(h)]
+    return name
+
+
+async def resolve_assignee(
+    name: str,
+    name_to_open_id: dict[str, str] | None = None,
+) -> str | None:
+    """
+    Look up open_id for assignee_name.
+    Resolution order:
+    1. Exact match in name_to_open_id (participant table)
+    2. Honorific-stripped exact match
+    3. Fuzzy match (startswith/in) — return None if multiple matches (ambiguous)
+    4. Fallback: contact +search-user — return None if >1 result and none in participants
+    """
     if not name.strip():
         return None
+
+    participant_open_ids = set((name_to_open_id or {}).values())
+
+    if name_to_open_id:
+        # 1. Exact match
+        if name in name_to_open_id:
+            return name_to_open_id[name]
+
+        # 2. Honorific-stripped exact match
+        stripped = _strip_honorific(name)
+        if stripped != name and stripped in name_to_open_id:
+            return name_to_open_id[stripped]
+
+        # 3. Fuzzy match — bail on ambiguity
+        candidates = [
+            oid for n, oid in name_to_open_id.items()
+            if n.startswith(stripped) or stripped in n
+        ]
+        if len(candidates) == 1:
+            return candidates[0]
+        if len(candidates) > 1:
+            logger.warning("Ambiguous assignee '%s' matches %d participants, leaving empty", name, len(candidates))
+            return None
+
+    # 4. Fallback: global contact search
     try:
         data = await run_lark(
             "contact",
             "+search-user",
             "--query",
-            name,
+            _strip_honorific(name),
             as_identity="user",
         )
         users = data.get("data", {}).get("users", [])
-        if users:
+        if not users:
+            return None
+        # If exactly one result, use it
+        if len(users) == 1:
             return users[0].get("open_id")
+        # Multiple results: only accept if exactly one is a known participant
+        participant_matches = [u for u in users if u.get("open_id") in participant_open_ids]
+        if len(participant_matches) == 1:
+            return participant_matches[0].get("open_id")
+        logger.warning("Contact search for '%s' returned %d results, cannot resolve", name, len(users))
     except Exception as e:
         logger.warning("Contact lookup failed for '%s': %s", name, e)
     return None
@@ -33,6 +87,7 @@ async def create_task_for_action_item(
     item: ActionItem,
     meeting_title: str,
     meeting_end_time: datetime | None = None,
+    name_to_open_id: dict[str, str] | None = None,
     tasklist_id: str | None = None,
 ) -> str | None:
     """
@@ -40,13 +95,14 @@ async def create_task_for_action_item(
     Returns the task_id on success, None on failure.
     """
     if item.assignee_open_id is None and item.assignee_name:
-        item.assignee_open_id = await resolve_assignee(item.assignee_name)
+        item.assignee_open_id = await resolve_assignee(item.assignee_name, name_to_open_id)
 
     desc_parts = [f"来自会议：**{meeting_title}**", "", f"背景：{item.context}"]
     if item.wiki_links:
         desc_parts.append("\n相关知识文档：")
         for doc in item.wiki_links:
-            desc_parts.append(f"- [{doc.title}]({doc.url})")
+            reason = f"（{doc.link_reason}）" if doc.link_reason else ""
+            desc_parts.append(f"- [{doc.title}]({doc.url}){reason}")
     description = "\n".join(desc_parts)
 
     # Build start / due timestamps

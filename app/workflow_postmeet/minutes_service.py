@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import re
 from datetime import datetime, timezone
@@ -48,18 +49,28 @@ async def get_meeting_record(
         ai_summary = await _fetch_doc_text(summary_token)
         logger.info("Fetched AI summary (%d chars) from %s", len(ai_summary), summary_token)
 
-    # Try to get meeting title + organizer name via vc +search
-    title, organizer_name = await _fetch_meeting_meta(meeting_id) if meeting_id else ("Unknown Meeting", "")
-
-    # Build open_id → name mapping: map note creator to organizer name
+    # Fetch full meeting detail: title, real end_time, all participant names
+    title = "Unknown Meeting"
+    end_time = datetime.now(tz=timezone.utc)
     id_to_name: dict[str, str] = {}
-    creator_id = note.get("creator_id", "")
-    if creator_id and organizer_name:
-        id_to_name[creator_id] = organizer_name
-    elif creator_id:
-        name = await _lookup_user_name(creator_id)
-        if name:
-            id_to_name[creator_id] = name
+
+    if meeting_id:
+        title, end_time, id_to_name = await _fetch_meeting_detail(meeting_id)
+
+    # Fallback: map only the note creator via vc +search
+    if not id_to_name:
+        fallback_title, organizer_name = await _fetch_meeting_meta_fallback(meeting_id) if meeting_id else ("Unknown Meeting", "")
+        if fallback_title != "Unknown Meeting":
+            title = fallback_title
+        creator_id = note.get("creator_id", "")
+        if creator_id and organizer_name:
+            id_to_name[creator_id] = organizer_name
+        elif creator_id:
+            name = await _lookup_user_name(creator_id)
+            if name:
+                id_to_name[creator_id] = name
+
+    name_to_open_id = {v: k for k, v in id_to_name.items()}
 
     # Replace <mention-user id="ou_xxx"/> with real names in transcript
     if id_to_name and transcript:
@@ -70,11 +81,68 @@ async def get_meeting_record(
         calendar_event_id=calendar_event_id,
         minute_token=summary_token or None,
         title=title,
-        end_time=datetime.now(tz=timezone.utc),
+        end_time=end_time,
         participant_open_ids=list(id_to_name.keys()),
         transcript=transcript,
         ai_summary=ai_summary,
+        name_to_open_id=name_to_open_id,
     )
+
+
+async def _fetch_meeting_detail(meeting_id: str) -> tuple[str, datetime, dict[str, str]]:
+    """
+    Get meeting title, real end_time, and full participant name mapping
+    via vc meeting get with with_participants=true.
+    Returns (title, end_time, id_to_name).
+    """
+    title = "Unknown Meeting"
+    end_time = datetime.now(tz=timezone.utc)
+    id_to_name: dict[str, str] = {}
+
+    try:
+        import json as _json
+        params = _json.dumps({"meeting_id": meeting_id, "with_participants": "true", "user_id_type": "open_id"})
+        data = await run_lark(
+            "vc", "meeting", "get",
+            "--params", params,
+            as_identity="user",
+            timeout=15,
+        )
+        meeting = data.get("data", {}).get("meeting", {})
+
+        topic = meeting.get("topic", "")
+        if topic:
+            title = topic
+
+        raw_end = meeting.get("end_time", "")
+        if raw_end:
+            try:
+                end_time = datetime.fromtimestamp(int(raw_end), tz=timezone.utc)
+            except (ValueError, TypeError):
+                pass
+
+        participants = meeting.get("participants", [])
+        if not isinstance(participants, list):
+            participants = []
+
+        open_ids = [p.get("id", "") for p in participants if p.get("id")]
+        if open_ids:
+            names = await asyncio.gather(
+                *[_lookup_user_name(oid) for oid in open_ids],
+                return_exceptions=True,
+            )
+            for oid, name in zip(open_ids, names):
+                if isinstance(name, str) and name:
+                    id_to_name[oid] = name
+
+        logger.info(
+            "Meeting detail: title='%s', end=%s, participants=%d",
+            title, end_time.isoformat(), len(id_to_name),
+        )
+    except Exception as e:
+        logger.warning("Failed to fetch meeting detail for %s: %s", meeting_id, e)
+
+    return title, end_time, id_to_name
 
 
 async def _fetch_doc_text(doc_token: str) -> str:
@@ -92,8 +160,8 @@ async def _fetch_doc_text(doc_token: str) -> str:
         return ""
 
 
-async def _fetch_meeting_meta(meeting_id: str) -> tuple[str, str]:
-    """Get meeting title and organizer name from vc +search."""
+async def _fetch_meeting_meta_fallback(meeting_id: str) -> tuple[str, str]:
+    """Fallback: get meeting title and organizer name from vc +search."""
     try:
         from datetime import date, timedelta
         start = (date.today() - timedelta(days=7)).isoformat()
@@ -119,9 +187,8 @@ async def _lookup_user_name(open_id: str) -> str:
     """Look up a user's name by open_id."""
     try:
         data = await run_lark(
-            "contact", "users", "get",
+            "contact", "+get-user",
             "--user-id", open_id,
-            "--user-id-type", "open_id",
             as_identity="user",
             timeout=10,
         )

@@ -34,6 +34,7 @@ Rules:
 - key_conclusions: 2-3 items, each max 15 words
 - open_questions: 1-2 items that this meeting should address, max 15 words each
 - anchor_url: null unless you see a direct anchor link in the content
+- **Language: respond in the same language as the meeting title. If the meeting title is Chinese, all text values must be in Chinese.**
 - Return ONLY valid JSON, no markdown fences
 """
 

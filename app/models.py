@@ -26,6 +26,10 @@ class WikiDoc:
     key_conclusions: list[str] = field(default_factory=list)
     open_questions: list[str] = field(default_factory=list)
     anchor_url: str = ""
+    task_background: str = ""
+    how_to_solve: str = ""
+    related_parties: str = ""
+    link_reason: str = ""
 
 
 @dataclass
@@ -49,3 +53,4 @@ class MeetingRecord:
     participant_open_ids: list[str]
     transcript: str = ""
     ai_summary: str = ""
+    name_to_open_id: dict[str, str] = field(default_factory=dict)

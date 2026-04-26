@@ -51,25 +51,52 @@ async def extract_action_items(transcript: str, ai_summary: str = "") -> list[Ac
         content = "[...transcript truncated...]\n" + content[-8000:]
 
     raw = await call_llm(ACTION_EXTRACTION_SYSTEM, f"Meeting content:\n\n{content}")
+    items_data = _parse_json_array(raw)
 
-    try:
-        match = re.search(r"\[.*?\]", raw, re.DOTALL)
-        if not match:
-            logger.warning("No JSON array in LLM response: %s", raw[:200])
-            return []
-        items_data = json.loads(match.group(0))
-        return [
-            ActionItem(
-                summary=item["summary"],
-                assignee_name=item.get("assignee_name", ""),
-                assignee_open_id=None,
-                due_hint=item.get("due_hint", ""),
-                start_hint=item.get("start_hint", ""),
-                context=item.get("context", ""),
-            )
-            for item in items_data
-            if item.get("summary")
-        ]
-    except (json.JSONDecodeError, KeyError) as e:
-        logger.error("Failed to parse action items: %s\nRaw: %s", e, raw[:300])
+    if items_data is None:
+        logger.warning("JSON parse failed, retrying with stricter prompt")
+        raw = await call_llm(
+            ACTION_EXTRACTION_SYSTEM,
+            f"Meeting content:\n\n{content}\n\nReturn ONLY a raw JSON array, no markdown.",
+        )
+        items_data = _parse_json_array(raw)
+
+    if items_data is None:
+        logger.error("Failed to parse action items after retry. Raw: %s", raw[:300])
         return []
+
+    result = []
+    for item in items_data:
+        if not item.get("summary"):
+            continue
+        result.append(ActionItem(
+            summary=item["summary"],
+            assignee_name=item.get("assignee_name", ""),
+            assignee_open_id=None,
+            due_hint=item.get("due_hint", ""),
+            start_hint=item.get("start_hint", ""),
+            context=item.get("context", ""),
+        ))
+    return result
+
+
+def _parse_json_array(raw: str) -> list | None:
+    """Extract a JSON array from LLM output. Returns None if parsing fails."""
+    # 1. Try code fence
+    fence_match = re.search(r"```(?:json)?\s*(\[.*?\])\s*```", raw, re.DOTALL)
+    if fence_match:
+        try:
+            return json.loads(fence_match.group(1))
+        except json.JSONDecodeError:
+            pass
+
+    # 2. Slice from first '[' to last ']'
+    start = raw.find("[")
+    end = raw.rfind("]")
+    if start != -1 and end != -1 and end > start:
+        try:
+            return json.loads(raw[start : end + 1])
+        except json.JSONDecodeError:
+            pass
+
+    return None
