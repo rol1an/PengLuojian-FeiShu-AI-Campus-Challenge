@@ -10,7 +10,7 @@ class Settings(BaseSettings):
     LARK_CLI_AS: str = "bot"
 
     # Calendar polling
-    PREMEET_PUSH_MINUTES: int = 10
+    PREMEET_PUSH_MINUTES: int = 25
     PREMEET_LOOKAHEAD_HOURS: int = 2
     PREMEET_POLL_INTERVAL: int = 60
     CALENDAR_ID: str = "primary"
@@ -35,6 +35,10 @@ class Settings(BaseSettings):
 
     # Event subscription
     EVENT_FILTER: str = r"vc\.meeting"
+
+    # IM context for pre-meeting
+    IM_CONTEXT_DAYS: int = 14
+    IM_CONTEXT_MAX_MESSAGES: int = 10
 
     # Task defaults
     TASK_DEFAULT_DUE_DAYS: int = 3

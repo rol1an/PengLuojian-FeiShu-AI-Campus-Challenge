@@ -7,11 +7,7 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 
 from app.config import settings
-from app.workflow_premeet.calendar_service import get_upcoming_events
-from app.workflow_premeet.wiki_service import generate_keywords, search_wiki
-from app.workflow_premeet.push_service import push_knowledge_to_participants
-from app.workflow_premeet.doc_enricher import enrich_and_repush
-from app.workflow_premeet.scheduler import create_scheduler, _pushed_events
+from app.workflow_premeet.scheduler import create_scheduler, _pushed_events, _run_premeet_pipeline
 from app.workflow_postmeet.event_listener import listen_for_meeting_end
 from app.workflow_postmeet.pipeline import handle_meeting_end_event, run_postmeet_pipeline_for_meeting
 
@@ -80,7 +76,7 @@ class PreMeetTriggerRequest(BaseModel):
 async def trigger_premeet(req: PreMeetTriggerRequest) -> dict:
     """
     Manually trigger the pre-meeting pipeline for a synthetic event.
-    Useful for testing the keyword extraction, wiki search, and card push.
+    Uses the same pipeline as the scheduler (brief card format).
     """
     from datetime import datetime, timezone, timedelta
     from app.models import CalendarEvent
@@ -95,29 +91,8 @@ async def trigger_premeet(req: PreMeetTriggerRequest) -> dict:
         organizer_open_id="",
     )
 
-    keywords = await generate_keywords(event.title, event.description)
-    docs = await search_wiki(
-        keywords,
-        event.title,
-        event.description,
-        attendee_open_ids=req.attendee_open_ids,
-    )
-
-    results: dict = {
-        "keywords": keywords,
-        "wiki_docs_found": len(docs),
-        "docs": [{"title": d.title, "url": d.url, "score": d.score} for d in docs],
-        "push_results": {},
-    }
-
-    if req.attendee_open_ids:
-        if docs:
-            await enrich_and_repush(docs, event)
-            results["push_results"] = {uid: True for uid in req.attendee_open_ids}
-        else:
-            results["push_results"] = await push_knowledge_to_participants(event, docs)
-
-    return results
+    await _run_premeet_pipeline(event)
+    return {"status": "triggered", "event_id": req.event_id, "attendees": req.attendee_open_ids}
 
 
 class PostMeetTriggerRequest(BaseModel):

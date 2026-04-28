@@ -34,7 +34,7 @@ async def get_upcoming_events(lookahead_hours: int | None = None) -> list[Calend
 
     events: list[CalendarEvent] = []
     for item in data.get("data", {}).get("items", []):
-        attendee_ids = await _get_attendee_open_ids(item["event_id"])
+        attendee_ids, attendee_names = await _get_attendee_info(item["event_id"])
         events.append(
             CalendarEvent(
                 event_id=item["event_id"],
@@ -47,13 +47,15 @@ async def get_upcoming_events(lookahead_hours: int | None = None) -> list[Calend
                     int(item["end_time"]["timestamp"]), tz=timezone.utc
                 ),
                 attendee_open_ids=attendee_ids,
-                organizer_open_id=item.get("organizer_user_id", ""),
+                organizer_open_id=item.get("event_organizer", {}).get("user_id", ""),
+                attendee_names=attendee_names,
             )
         )
     return events
 
 
-async def _get_attendee_open_ids(event_id: str) -> list[str]:
+async def _get_attendee_info(event_id: str) -> tuple[list[str], dict[str, str]]:
+    """Return (open_id list, open_id→display_name map) for a calendar event."""
     try:
         data = await run_lark(
             "calendar",
@@ -69,7 +71,15 @@ async def _get_attendee_open_ids(event_id: str) -> list[str]:
             ),
             as_identity="user",
         )
-        return [a["user_id"] for a in data.get("data", {}).get("items", []) if a.get("type") == "user" and a.get("user_id")]
+        ids: list[str] = []
+        names: dict[str, str] = {}
+        for a in data.get("data", {}).get("items", []):
+            if a.get("type") == "user" and a.get("user_id"):
+                uid = a["user_id"]
+                ids.append(uid)
+                if a.get("display_name"):
+                    names[uid] = a["display_name"]
+        return ids, names
     except Exception as e:
         logger.warning("Failed to fetch attendees for event %s: %s", event_id, e)
-        return []
+        return [], {}

@@ -59,6 +59,7 @@ async def search_wiki(
     title: str = "",
     description: str = "",
     attendee_open_ids: list[str] | None = None,
+    organizer_open_id: str = "",
 ) -> list[WikiDoc]:
     """Search wiki, apply Layer 1 quality/relevance filtering, then Layer 2 LLM rerank."""
     if attendee_open_ids is None:
@@ -90,7 +91,10 @@ async def search_wiki(
     scored: list[tuple[dict, float, float]] = []
     for item in raw_candidates:
         q = _quality_score(item)
-        r = _relevance_score(item, keywords, title, attendee_open_ids)
+        r = _relevance_score(
+            item, keywords, title, attendee_open_ids,
+            organizer_open_id=organizer_open_id,
+        )
         if q >= settings.WIKI_QUALITY_THRESHOLD:
             scored.append((item, q, r))
         else:
@@ -107,6 +111,9 @@ async def search_wiki(
     # Take top max_candidates for LLM
     top = scored[:max_candidates]
     candidates = [_item_to_doc(item) for item, _q, _r in top]
+
+    # Dedup before rerank so duplicates don't consume slots
+    candidates = await _dedup_similar_docs(candidates)
 
     if len(candidates) <= settings.WIKI_MAX_DOCS:
         return candidates
@@ -128,7 +135,8 @@ async def _rerank_with_llm(
         return ""
 
     candidate_list = "\n".join(
-        f"- node_token={d.node_token}: {d.title} ({d.space_name})"
+        f"- node_token={d.node_token}: {d.title}"
+        + (f" | excerpt: {d.excerpt[:80]}" if d.excerpt else "")
         for d in candidates
     )
     user_msg = (
@@ -173,33 +181,108 @@ async def _rerank_with_llm(
         return candidates[:max_docs]
 
 
+DEDUP_SYSTEM = """You are a document deduplication assistant.
+Given a list of documents (title + excerpt), identify groups of documents that are essentially the same document (same content, just stored in different locations or with slightly different titles).
+
+Return ONLY valid JSON (no markdown fences):
+{
+  "duplicate_groups": [
+    ["node_token_A", "node_token_B"],
+    ...
+  ]
+}
+
+Rules:
+- Only group documents if their content is clearly the same (not just similar topics — truly the same document)
+- Each group must have at least 2 node_tokens
+- If no duplicates exist, return {"duplicate_groups": []}
+"""
+
+
+async def _dedup_similar_docs(docs: list[WikiDoc]) -> list[WikiDoc]:
+    """Remove near-duplicate docs via LLM; for each duplicate group keep the most recently edited."""
+    if len(docs) <= 1:
+        return docs
+    doc_list = "\n".join(
+        f"- node_token={d.node_token}: {d.title}" + (f" | {d.excerpt[:100]}" if d.excerpt else "")
+        for d in docs
+    )
+    try:
+        raw = await call_llm(DEDUP_SYSTEM, f"Documents:\n{doc_list}")
+        match = re.search(r"\{.*\}", raw, re.DOTALL)
+        if not match:
+            return docs
+        data = json.loads(match.group(0))
+        groups: list[list[str]] = data.get("duplicate_groups", [])
+        if not groups:
+            return docs
+
+        # For each duplicate group, keep only the doc with latest obj_edit_time
+        tokens_to_remove: set[str] = set()
+        for group in groups:
+            group_docs = [d for d in docs if d.node_token in group]
+            if len(group_docs) < 2:
+                continue
+            # Sort by edit time descending; keep first, remove rest
+            def _edit_ts(d: WikiDoc) -> int:
+                try:
+                    return int(d.obj_edit_time)
+                except (ValueError, TypeError):
+                    return 0
+            group_docs.sort(key=_edit_ts, reverse=True)
+            for dup in group_docs[1:]:
+                tokens_to_remove.add(dup.node_token)
+                logger.info("Dedup: removing '%s' (older duplicate of '%s')", dup.title, group_docs[0].title)
+
+        return [d for d in docs if d.node_token not in tokens_to_remove]
+    except Exception as e:
+        logger.debug("_dedup_similar_docs failed, skipping: %s", e)
+        return docs
+
+
 async def _search_one_raw(keyword: str) -> list[dict]:
-    """Search wiki for one keyword, return raw API items."""
-    params: dict = {"query": keyword, "count": 5}
-    if settings.WIKI_SPACE_ID:
-        params["space_id"] = settings.WIKI_SPACE_ID
+    """Full-text search wiki/docs via docs +search (Search v2), return normalised items."""
+    args = ["docs", "+search", "--query", keyword, "--page-size", "10"]
 
     data = await run_lark(
-        "wiki",
-        "nodes",
-        "list",
-        "--params",
-        json.dumps(params),
+        *args,
         as_identity="user",
         timeout=settings.WIKI_SEARCH_TIMEOUT,
     )
-    return data.get("data", {}).get("items", [])
+    results = data.get("data", {}).get("results", [])
+
+    items: list[dict] = []
+    for r in results:
+        if r.get("entity_type") != "WIKI":
+            continue
+        meta = r.get("result_meta", {})
+        # Strip <h>...</h> highlight tags from summary
+        raw_summary = r.get("summary_highlighted", "")
+        excerpt = re.sub(r"</?h>", "", raw_summary).strip()
+        items.append({
+            "node_token": meta.get("token", ""),
+            "obj_token": meta.get("token", ""),   # same token for docs +search
+            "title": re.sub(r"</?h>", "", r.get("title_highlighted", meta.get("token", ""))).strip(),
+            "url": meta.get("url", ""),
+            "space_name": "",
+            "owner": meta.get("owner_id", ""),
+            "creator": meta.get("owner_id", ""),
+            "obj_edit_time": str(meta.get("update_time", "")),
+            "obj_type": meta.get("doc_types", "").lower(),
+            "excerpt": excerpt,
+        })
+    return items
 
 
 def _item_to_doc(item: dict) -> WikiDoc:
-    node_token = item.get("node_token", "")
     return WikiDoc(
         title=item.get("title", "Untitled"),
-        url=_build_wiki_url(node_token),
+        url=item.get("url") or _build_wiki_url(item.get("node_token", "")),
         space_name=item.get("space_name", ""),
-        node_token=node_token,
+        node_token=item.get("node_token", ""),
         obj_token=item.get("obj_token", ""),
         excerpt=item.get("excerpt", ""),
+        obj_edit_time=str(item.get("obj_edit_time", "")),
     )
 
 
@@ -247,6 +330,7 @@ def _relevance_score(
     keywords: list[str],
     meeting_title: str,
     attendee_open_ids: list[str],
+    organizer_open_id: str = "",
 ) -> float:
     """Rule-based meeting relevance score (0~1)."""
     score = 0.0
@@ -266,6 +350,10 @@ def _relevance_score(
     # Space name matches any keyword
     space_name = item.get("space_name", "").lower()
     if any(kw.lower() in space_name for kw in keywords if len(kw) > 1):
+        score += 0.2
+
+    # Organizer is owner/creator of the doc
+    if organizer_open_id and organizer_open_id in (owner, creator):
         score += 0.2
 
     return score

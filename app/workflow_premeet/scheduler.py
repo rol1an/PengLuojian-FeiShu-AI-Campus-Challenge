@@ -9,8 +9,15 @@ from app.config import settings
 from app.models import CalendarEvent
 from app.workflow_premeet.calendar_service import get_upcoming_events
 from app.workflow_premeet.wiki_service import generate_keywords, search_wiki
-from app.workflow_premeet.push_service import push_knowledge_to_participants
-from app.workflow_premeet.doc_enricher import enrich_and_repush
+from app.workflow_premeet.push_service import push_knowledge_to_participants, push_card_payload
+from app.workflow_premeet.doc_enricher import enrich_and_repush, enrich_docs_inplace
+from app.workflow_premeet.im_context_service import (
+    extract_chat_id_from_description,
+    get_dm_messages,
+    get_group_messages,
+)
+from app.workflow_premeet.context_synthesizer import synthesize_brief
+from app.workflow_premeet.card_builder import build_brief_card
 
 logger = logging.getLogger(__name__)
 
@@ -47,32 +54,70 @@ async def premeet_check_job() -> None:
 
 
 async def _run_premeet_pipeline(event: CalendarEvent) -> None:
-    """Full pipeline: keywords → wiki search → push basic card → async enrich."""
+    """Full pipeline: keywords → IM context → wiki search → enrich → synthesize → push brief card."""
     try:
         keywords = await generate_keywords(event.title, event.description)
         logger.info("Keywords for '%s': %s", event.title, keywords)
+
+        if not event.attendee_open_ids:
+            logger.warning("No attendees found for event %s", event.event_id)
+            return
+
+        # Fetch IM context in parallel (all fail silently)
+        chat_id = extract_chat_id_from_description(event.description)
+        name_map = event.attendee_names  # open_id → display_name
+        # DM targets: organizer + all other attendees (deduped, exclude self)
+        dm_targets = list({
+            uid for uid in [event.organizer_open_id] + event.attendee_open_ids
+            if uid
+        })
+        dm_tasks = [get_dm_messages(uid, target_name=name_map.get(uid, "")) for uid in dm_targets]
+        dm_results = await asyncio.gather(
+            *dm_tasks,
+            get_group_messages(chat_id, name_map=name_map) if chat_id else _empty_list(),
+        )
+        group_msgs = dm_results[-1]
+        # Merge DM messages from all targets, deduplicate by content+timestamp, keep newest-first
+        seen_dm: set[str] = set()
+        dm_msgs: list = []
+        for msgs in dm_results[:-1]:
+            for m in msgs:
+                key = f"{m.timestamp.isoformat()}:{m.content[:50]}"
+                if key not in seen_dm:
+                    seen_dm.add(key)
+                    dm_msgs.append(m)
+        dm_msgs.sort(key=lambda m: m.timestamp, reverse=True)
+        dm_msgs = dm_msgs[:settings.IM_CONTEXT_MAX_MESSAGES]
+        logger.info(
+            "IM context for '%s': %d DM msgs (%d targets), %d group msgs",
+            event.title, len(dm_msgs), len(dm_targets), len(group_msgs),
+        )
 
         docs = await search_wiki(
             keywords,
             event.title,
             event.description,
             attendee_open_ids=event.attendee_open_ids,
+            organizer_open_id=event.organizer_open_id,
         )
         logger.info("Found %d wiki docs for '%s'", len(docs), event.title)
 
-        if not event.attendee_open_ids:
-            logger.warning("No attendees found for event %s", event.event_id)
-            return
+        # Enrich top 3 docs in-place (fills why_relevant, conclusions, questions)
+        await enrich_docs_inplace(docs[:3], event.title)
 
-        # Layer 3 + 4: enrich first, then push single card (basic as fallback)
-        # This avoids sending two messages to the user
-        if docs:
-            await enrich_and_repush(docs, event)
-        else:
-            await push_knowledge_to_participants(event, docs)
+        # Synthesize 4-source brief and push the new card format
+        brief = await synthesize_brief(event, dm_msgs, group_msgs, docs)
+        payload = build_brief_card(event, brief)
+        await push_card_payload(payload, event.attendee_open_ids, event.event_id, label="brief")
 
     except Exception as e:
         logger.error("Pre-meeting push pipeline failed for %s: %s", event.event_id, e)
+
+
+async def _empty_list() -> list:
+    return []
+
+
 
 
 def create_scheduler() -> AsyncIOScheduler:

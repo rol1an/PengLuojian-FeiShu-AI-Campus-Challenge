@@ -3,6 +3,31 @@ from datetime import datetime
 
 
 @dataclass
+class ChatMessage:
+    sender_open_id: str
+    sender_name: str
+    content: str          # plain text
+    timestamp: datetime
+    chat_id: str
+    source: str           # "dm" | "group"
+    chat_name: str = ""   # DM: the other party's display name; group: group name
+
+
+@dataclass
+class ContextBullet:
+    text: str
+    source_label: str  # e.g. "04-28 14:30 · 张三（私聊）"
+
+
+@dataclass
+class MeetingBrief:
+    one_line: str
+    context_bullets: list[ContextBullet]  # key points from chats, 2-4 items
+    key_docs: "list[WikiDoc]"             # top 3 docs
+    open_questions: list[str]             # 1-3 unresolved points
+
+
+@dataclass
 class CalendarEvent:
     event_id: str
     title: str
@@ -11,6 +36,7 @@ class CalendarEvent:
     end_time: datetime
     attendee_open_ids: list[str]
     organizer_open_id: str
+    attendee_names: dict[str, str] = field(default_factory=dict)  # open_id → display_name
 
 
 @dataclass
@@ -26,6 +52,7 @@ class WikiDoc:
     key_conclusions: list[str] = field(default_factory=list)
     open_questions: list[str] = field(default_factory=list)
     anchor_url: str = ""
+    obj_edit_time: str = ""   # unix timestamp string, for recency comparison
     task_background: str = ""
     how_to_solve: str = ""
     related_parties: str = ""

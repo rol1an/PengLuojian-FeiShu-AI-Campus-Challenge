@@ -1,6 +1,6 @@
 from datetime import timezone, timedelta
 
-from app.models import CalendarEvent, WikiDoc
+from app.models import CalendarEvent, MeetingBrief, WikiDoc
 
 _CST = timezone(timedelta(hours=8))
 
@@ -38,7 +38,7 @@ def build_knowledge_card(event: CalendarEvent, docs: list[WikiDoc]) -> dict:
                 "elements": [
                     {
                         "tag": "plain_text",
-                        "content": "由飞书会议助手自动生成 · Powered by Claude",
+                        "content": "由飞书会议助手自动生成",
                     }
                 ],
             },
@@ -58,11 +58,11 @@ def build_enriched_knowledge_card(event: CalendarEvent, docs: list[WikiDoc]) -> 
         lines = [f"**{i}. [{doc.title}]({link})**"]
 
         if doc.why_relevant:
-            lines.append(f"与本次会相关：{doc.why_relevant}")
+            lines.append(f"🔗 与本次会相关：{doc.why_relevant}")
         if doc.key_conclusions:
-            lines.append("关键结论：" + " · ".join(doc.key_conclusions))
+            lines.append("📌 关键结论：" + " · ".join(doc.key_conclusions))
         if doc.open_questions:
-            lines.append("待确认：" + " · ".join(doc.open_questions))
+            lines.append("❓ 待确认：" + " · ".join(doc.open_questions))
         if not (doc.why_relevant or doc.key_conclusions):
             lines.append(doc.space_name or doc.excerpt or "")
 
@@ -103,7 +103,7 @@ def build_enriched_knowledge_card(event: CalendarEvent, docs: list[WikiDoc]) -> 
                 "elements": [
                     {
                         "tag": "plain_text",
-                        "content": "由飞书会议助手自动生成 · Powered by Claude",
+                        "content": "由飞书会议助手自动生成",
                     }
                 ],
             },
@@ -147,7 +147,7 @@ def build_low_confidence_card(event: CalendarEvent, docs: list[WikiDoc]) -> dict
                 "elements": [
                     {
                         "tag": "plain_text",
-                        "content": "由飞书会议助手自动生成 · Powered by Claude",
+                        "content": "由飞书会议助手自动生成",
                     }
                 ],
             },
@@ -182,6 +182,67 @@ def build_no_docs_card(event: CalendarEvent) -> dict:
             ],
         },
     }
+
+
+def build_brief_card(event: CalendarEvent, brief: MeetingBrief) -> dict:
+    """4-section pre-meeting brief card: conclusion / context / materials / questions."""
+    start_str = event.start_time.astimezone(_CST).strftime("%H:%M")
+    elements: list[dict] = []
+
+    # Section 2: recent context from chats
+    if brief.context_bullets:
+        lines = []
+        for b in brief.context_bullets:
+            line = f"💬 {b.text}"
+            if b.source_label:
+                line += f"\n————📅{b.source_label}的消息"
+            lines.append(line)
+        context_text = "**最近上下文**\n" + "\n\n".join(lines)
+    else:
+        context_text = "**最近上下文**\n暂无相关聊天记录"
+    elements.append({"tag": "div", "text": {"tag": "lark_md", "content": context_text}})
+    elements.append({"tag": "hr"})
+
+    # Section 3: key documents (up to 3)
+    doc_lines = ["**关键材料**"]
+    for i, doc in enumerate(brief.key_docs[:3], start=1):
+        link = doc.anchor_url or doc.url
+        doc_lines.append(f"{i}. [{doc.title}]({link})")
+        if doc.why_relevant:
+            doc_lines.append(f"   📄 {doc.why_relevant}")
+        for c in doc.key_conclusions:
+            doc_lines.append(f"   📌 {c}")
+    if not brief.key_docs:
+        doc_lines.append("暂无相关文档")
+    elements.append({"tag": "div", "text": {"tag": "lark_md", "content": "\n".join(doc_lines)}})
+
+    # Section 4: open questions (only if present)
+    if brief.open_questions:
+        elements.append({"tag": "hr"})
+        bullets = "\n".join(f"• {q}" for q in brief.open_questions)
+        elements.append({
+            "tag": "div",
+            "text": {"tag": "lark_md", "content": f"**待确认问题**\n{bullets}"},
+        })
+
+    elements.append({"tag": "hr"})
+    elements.append({
+        "tag": "note",
+        "elements": [{"tag": "plain_text", "content": "由飞书会议助手自动生成 · Powered by Doubao"}],
+    })
+
+    card = {
+        "config": {"wide_screen_mode": True},
+        "header": {
+            "title": {
+                "tag": "plain_text",
+                "content": f"🗓 会前同步卡 — {event.title}（{start_str}）",
+            },
+            "template": "blue",
+        },
+        "elements": elements,
+    }
+    return {"msg_type": "interactive", "card": card}
 
 
 def _basic_doc_elements(docs: list[WikiDoc]) -> list[dict]:

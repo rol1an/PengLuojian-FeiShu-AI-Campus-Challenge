@@ -30,13 +30,24 @@ Given a meeting title and a wiki document's content, extract the following in JS
 }
 
 Rules:
-- why_relevant: max 30 words, specific to the meeting
-- key_conclusions: 2-3 items, each max 15 words
+- why_relevant: max 20 words, specific to the meeting
+- key_conclusions: exactly 2 items. Each must be a complete standalone sentence (~25 Chinese characters) with 3 elements: (1) Subject/Topic: who or what this is about, (2) Result/State: what was achieved/found/decided, (3) Significance: why it matters for this meeting. Example: "RAG召回模块已完成改造，准确率提升至92%，是本次架构讨论的核心基线。"
 - open_questions: 1-2 items that this meeting should address, max 15 words each
 - anchor_url: null unless you see a direct anchor link in the content
 - **Language: respond in the same language as the meeting title. If the meeting title is Chinese, all text values must be in Chinese.**
 - Return ONLY valid JSON, no markdown fences
 """
+
+
+async def enrich_docs_inplace(docs: list[WikiDoc], meeting_title: str) -> None:
+    """Enrich top docs in-place (fill why_relevant / conclusions / questions). No pushing."""
+    if not docs:
+        return
+    tasks = [_enrich_one(doc, meeting_title) for doc in docs]
+    results = await asyncio.gather(*tasks, return_exceptions=True)
+    for doc, result in zip(docs, results):
+        if isinstance(result, Exception):
+            logger.debug("Enrichment skipped for '%s': %s", doc.title, result)
 
 
 async def enrich_and_repush(
