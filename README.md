@@ -8,7 +8,7 @@
 
 # 飞书会议助手
 
-> 基于豆包大模型的飞书会议自动化助手，会前推送知识卡片，会后自动生成 Action Items 并创建飞书任务。
+> 基于豆包大模型的飞书会议自动化助手，会前融合聊天记录与知识库推送「会前同步卡」，会后自动生成 Action Items 并创建飞书任务。
 
 <div align="center">
 
@@ -18,19 +18,22 @@
 
 ## 功能演示
 
-### 会前：智能知识卡片推送（精华版）
+### 会前：「会前同步卡」推送
 
-会议开始前 10 分钟，系统自动检测飞书日历，提取关键词，搜索知识库并经 LLM 四层筛选（质量过滤 → 语义精排 → 文档富化 → 置信度判断），将最相关的参考文档以精华卡片推送给所有参会人。每篇文档包含：**与本次会的相关原因、关键结论、待确认问题**。
+会议开始前 25 分钟，系统自动检测飞书日历，**并发融合四路信息**，经 LLM 两步提炼后生成「会前同步卡」推送给所有参会人。
 
-![会前知识卡片精华版](picture_data/premeetexample1.png)
+**四路信息融合**：
+1. 会议基础信息（标题 / 议程 / 参会人 / 发起人）
+2. 当前用户与所有参会人的私聊 DM（近 14 天，最新 10 条）
+3. 会议邀请群聊的上下文（从邀请描述中提取 openChatId，近 7 天）
+4. 知识库文档（质量过滤 → 语义精排 → 文档富化 → LLM 去重）
 
-如果文档富化过程中失败，参会人在飞书消息中直接收到降级的基础结构化卡片，无需手动整理资料。
+**卡片三段式结构**：
+- **最近上下文**：LLM 两步提炼——先从原始消息中选 3-5 句最相关原句，再改写成 40-50 字自然句（含主体 + 进展），每条附 📅 溯源标签（时间 + 来源对话/群聊）
+- **关键材料**：top 3 相关文档，含 📄 相关说明 + 📌 关键结论
+- **待确认问题**：LLM 从上下文中提炼 1-3 条需在会中解决的问题
 
-![会前卡片消息视图](picture_data/premeetexample2.png)
-
-若置信度判断低于阈值（文档平均质量较低），推送的卡片显示为橙色，且会提醒参会人当前置信度低
-
-![会前低置信度卡片消息视图](picture_data/premeetlowtrust.png)
+![会前同步卡](picture_data/premeetexample1.png)
 
 ### 服务运行日志
 
@@ -54,12 +57,19 @@
 
 ```
 工作流 1 · 会前推送
-飞书日历（APScheduler 轮询）
-  → LLM 关键词提取
-  → 飞书 Wiki 搜索 + 质量过滤（时效 / 类型 / 标题）
-  → LLM 语义精排（0-10 分，输出相关原因）
-  → 文档正文富化（关键结论 / 待确认问题）
-  → 置信度判断 → 精华卡片推送给参会人
+飞书日历（APScheduler 轮询，会议前 25 分钟触发）
+  → 并发四路信息融合
+      ├─ 私聊 DM（与所有参会人，近 14 天）
+      ├─ 会议群聊上下文（近 7 天）
+      └─ 知识库文档
+            → LLM 关键词提取
+            → docs +search 全文搜索
+            → 质量过滤（时效 / 类型 / 标题 / 发起人加成）
+            → LLM 语义精排（0-10 分）
+            → LLM 去重（跨知识库相同内容只留最新版）
+            → 文档正文富化（关键结论 / 待确认问题）
+  → LLM 两步上下文提炼（SELECT 关键句 → SYNTHESIZE 自然句 + 溯源标签）
+  → 会前同步卡推送给参会人
 
 工作流 2 · 会后处理
 飞书 vc.meeting.end 事件（WebSocket 监听）
@@ -116,7 +126,7 @@ curl -X POST http://localhost:8080/debug/trigger-postmeet \
 
 # Feishu Meeting Assistant
 
-> An automated Feishu meeting assistant powered by Doubao LLM. Pushes pre-meeting knowledge cards and automatically generates Action Items with Feishu tasks after meetings.
+> An automated Feishu meeting assistant powered by Doubao LLM. Fuses chat context and knowledge base to push a pre-meeting briefing card, then auto-generates Action Items and Feishu tasks after meetings.
 
 <div align="center">
 
@@ -126,17 +136,22 @@ curl -X POST http://localhost:8080/debug/trigger-postmeet \
 
 ## Demo
 
-### Pre-meeting: Enriched Knowledge Card Push
+### Pre-meeting: "Meeting Briefing Card" Push
 
-10 minutes before a meeting, the system detects the calendar event, extracts keywords, and runs a 4-layer pipeline (quality filter → semantic reranking → document enrichment → confidence scoring) to push a single enriched card to all attendees. Each document includes: **why it's relevant to this meeting, key conclusions, and open questions to address**.
+25 minutes before a meeting, the system detects the calendar event and **concurrently fuses four information sources**, then uses a two-step LLM pipeline to generate and push a structured briefing card to all attendees.
 
-![Pre-meeting Enriched Card](picture_data/premeetexample1.png)
+**Four information sources (concurrent)**:
+1. Meeting basics (title / agenda / attendees / organizer)
+2. Direct message history with all attendees (last 14 days, top 10 messages)
+3. Group chat context from the meeting invite (last 7 days, if a group link is embedded)
+4. Knowledge base documents (quality filter → semantic reranking → enrichment → deduplication)
 
-### Attendees Receive the Card in Feishu Messages
+**Three-section card structure**:
+- **Recent Context**: Two-step LLM synthesis — select 3-5 most relevant sentences from raw messages, then rewrite each into a 40-50 char natural sentence (subject + content + status), with a 📅 source label (timestamp + DM partner / group name)
+- **Key Materials**: Top 3 relevant docs with 📄 relevance note + 📌 key conclusion
+- **Open Questions**: 1-3 unresolved points LLM extracted from context
 
-Attendees receive the structured card directly in Feishu IM — no manual preparation needed.
-
-![Pre-meeting Card in Message View](picture_data/premeetexample2.png)
+![Pre-meeting Briefing Card](picture_data/premeetexample1.png)
 
 ### Service Logs
 
@@ -160,12 +175,19 @@ Each task includes meeting context, assignee, due date, and automatically linked
 
 ```
 Workflow 1 · Pre-meeting Push
-Feishu Calendar (APScheduler polling)
-  → LLM keyword extraction
-  → Feishu Wiki search + quality filter (recency / type / title)
-  → LLM semantic reranking (0-10 score with relevance reason)
-  → Document enrichment (key conclusions / open questions)
-  → Confidence scoring → Push enriched card to all attendees
+Feishu Calendar (APScheduler polling, triggers 25 min before meeting)
+  → Concurrent 4-source fusion
+      ├─ DM history with all attendees (last 14 days)
+      ├─ Meeting group chat context (last 7 days)
+      └─ Knowledge base docs
+            → LLM keyword extraction
+            → docs +search full-text search
+            → Quality filter (recency / type / title / organizer boost)
+            → LLM semantic reranking (0-10 score)
+            → LLM deduplication (keep newest across knowledge spaces)
+            → Document enrichment (conclusions / open questions)
+  → Two-step LLM context synthesis (SELECT key sentences → SYNTHESIZE natural bullets + source labels)
+  → Push briefing card to all attendees
 
 Workflow 2 · Post-meeting Processing
 Feishu vc.meeting.end event (WebSocket listener)
