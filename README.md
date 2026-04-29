@@ -33,7 +33,7 @@
 - **关键材料**：top 3 相关文档，含 📄 相关说明 + 📌 关键结论
 - **待确认问题**：LLM 从上下文中提炼 1-3 条需在会中解决的问题
 
-![会前同步卡](picture_data/premeetexample1.png)
+![会前同步卡](picture_data/new_premeetexample1.png)
 
 ### 服务运行日志
 
