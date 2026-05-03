@@ -10,20 +10,35 @@ from app.models import WikiDoc
 
 logger = logging.getLogger(__name__)
 
-KEYWORD_SYSTEM = """You are a meeting preparation assistant.
-Given a meeting title and optional agenda description, extract 3-5 concise search keywords
-that would find the most relevant wiki/knowledge base documents for participants to read before the meeting.
+MEETING_ANALYSIS_SYSTEM = """你是一名新入职的秘书，需要在会议前为老板准备背景材料。
+你没有任何历史上下文，需要从零开始思考这次会议。
 
-Rules:
-- Return ONLY a JSON array of strings: ["keyword1", "keyword2", ...]
-- Each keyword should be 1-4 words, specific and concrete
-- Prefer technical terms, product names, project names, acronyms over generic words
-- No duplicates, no generic words like "meeting" or "discussion"
+给定会议标题和议程，请：
+1. 判断会议类型（决策会/进展回顾/问题排查/项目启动/头脑风暴）
+2. 推断这次会议"最想解决的 2-3 个核心问题"（不要复述标题，要推断会议背后真正需要解决的事）
+3. 据此给出 4-6 个文档搜索词（比关键词更具体，能找到有决策价值的文档）
+   - **第一条搜索词必须是会议标题中的专有名词/产品名/项目名原词（直接照抄，不得替换、意译或拼接额外修饰词），例如标题含"OpenClaw"则第一条就写"OpenClaw"，含"Trae IDE"则写"Trae IDE"**
+   - 其余搜索词可以扩展语义，但至少一条包含来自标题的逐字短语
+4. 总结"在近期聊天记录中最应该寻找什么信息"（一句话，指明信息类型，如进展/阻塞点/待确认事项）
+
+Return ONLY valid JSON (no markdown fences):
+{
+  "meeting_type": "类型",
+  "core_questions": ["核心问题1", "核心问题2"],
+  "doc_search_queries": ["搜索词1", "搜索词2", "搜索词3", "搜索词4"],
+  "im_focus": "在聊天记录中重点寻找的信息类型（一句话）"
+}
 """
 
 RERANK_SYSTEM = """You are a meeting preparation assistant.
 Given a meeting title, agenda, and a list of candidate wiki documents,
 score each document's relevance and value for participants to read before the meeting.
+
+Each document includes:
+- title: document title
+- excerpt: document summary (up to 500 chars)
+- space: knowledge space this document belongs to (same space as the meeting topic = more likely relevant)
+- last_edited: how recently the document was last edited (more recent = more likely to reflect current state)
 
 Return ONLY a JSON array of objects for up to {max_docs} most relevant documents, ordered by score descending:
 [{{"node_token": "xxx", "score": 7.5, "reason": "one sentence"}}]
@@ -34,6 +49,11 @@ Score scale (0-10):
 - 6-8: Relevant, useful background reading
 - 9-10: Highly relevant, directly actionable before this meeting
 
+Scoring guidance:
+- Recently edited (<7 days) AND title matches meeting topic → prefer higher scores
+- Template/reference docs (usually older, generic titles) → prefer lower scores
+- space matches the meeting's project/team → slight boost
+
 Only include documents with score >= 3. Omit clearly irrelevant ones.
 Authority/role match is already factored in — focus on content relevance and decision value.
 """
@@ -41,17 +61,44 @@ Authority/role match is already factored in — focus on content relevance and d
 _TEMPLATE_KEYWORDS = ("模板", "示例", "untitled", "test", "draft")
 
 
-async def generate_keywords(title: str, description: str = "") -> list[str]:
-    user_msg = f"Meeting title: {title}\nAgenda/Description: {description or '(none)'}"
-    raw = await call_llm(KEYWORD_SYSTEM, user_msg)
+async def analyze_meeting(title: str, description: str = "") -> dict:
+    """Analyze a meeting as a new secretary from scratch.
+
+    Returns a dict with:
+      - meeting_type: str
+      - core_questions: list[str]
+      - doc_search_queries: list[str]  (used as wiki search keywords)
+      - im_focus: str  (passed to IM context selector)
+    Falls back gracefully if LLM fails.
+    """
+    user_msg = f"会议标题：{title}\n议程/描述：{description or '（无）'}"
+    raw = await call_llm(MEETING_ANALYSIS_SYSTEM, user_msg)
     try:
-        match = re.search(r"\[.*?\]", raw, re.DOTALL)
+        match = re.search(r"\{.*\}", raw, re.DOTALL)
         if not match:
-            return [title]
-        return json.loads(match.group(0))
-    except (json.JSONDecodeError, AttributeError):
-        logger.warning("Keyword extraction failed, using title: %s", raw[:100])
-        return [title]
+            raise ValueError("no JSON object found")
+        data = json.loads(match.group(0))
+        queries = data.get("doc_search_queries") or []
+        if not queries:
+            queries = [title]
+        logger.info(
+            "Meeting analysis for '%s': type=%s, queries=%s, im_focus=%s",
+            title, data.get("meeting_type", "?"), queries, data.get("im_focus", ""),
+        )
+        return {
+            "meeting_type": data.get("meeting_type", ""),
+            "core_questions": data.get("core_questions", []),
+            "doc_search_queries": queries,
+            "im_focus": data.get("im_focus", ""),
+        }
+    except (json.JSONDecodeError, ValueError, AttributeError) as e:
+        logger.warning("analyze_meeting failed (%s), falling back to title keywords", e)
+        return {
+            "meeting_type": "",
+            "core_questions": [],
+            "doc_search_queries": [title],
+            "im_focus": "",
+        }
 
 
 async def search_wiki(
@@ -69,7 +116,11 @@ async def search_wiki(
     raw_candidates: list[dict] = []
     max_candidates = settings.WIKI_MAX_DOCS * 2
 
-    for kw in keywords:
+    # Fallback: also search with noun chunks split from the meeting title,
+    # so that verbatim title fragments always get a chance to hit wiki docs.
+    all_keywords = list(keywords) + _title_chunks(title, existing=keywords)
+
+    for kw in all_keywords:
         try:
             items = await _search_one_raw(kw)
             for item in items:
@@ -121,6 +172,22 @@ async def search_wiki(
     return await _rerank_with_llm(title, description, candidates, settings.WIKI_MAX_DOCS)
 
 
+def _doc_to_rerank_item(doc: WikiDoc) -> dict:
+    """Build a rich metadata dict for LLM rerank input."""
+    item: dict = {"node_token": doc.node_token, "title": doc.title}
+    if doc.excerpt:
+        item["excerpt"] = doc.excerpt[:500]
+    if doc.space_name:
+        item["space"] = doc.space_name
+    if doc.obj_edit_time:
+        try:
+            days_ago = int((time.time() - int(doc.obj_edit_time)) / 86400)
+            item["last_edited"] = "今天" if days_ago == 0 else f"{days_ago}天前"
+        except (ValueError, TypeError):
+            pass
+    return item
+
+
 async def _rerank_with_llm(
     title: str,
     description: str,
@@ -128,15 +195,8 @@ async def _rerank_with_llm(
     max_docs: int,
 ) -> list[WikiDoc]:
     """Layer 2: LLM scores and reorders candidates; fills remainder if needed."""
-    now_ts = time.time()
-
-    def _age_label(doc: WikiDoc) -> str:
-        # obj_edit_time stored in excerpt as fallback (not used here, age unknown)
-        return ""
-
     candidate_list = "\n".join(
-        f"- node_token={d.node_token}: {d.title}"
-        + (f" | excerpt: {d.excerpt[:80]}" if d.excerpt else "")
+        json.dumps(_doc_to_rerank_item(d), ensure_ascii=False)
         for d in candidates
     )
     user_msg = (
@@ -357,6 +417,49 @@ def _relevance_score(
         score += 0.2
 
     return score
+
+
+def _title_chunks(title: str, existing: list[str]) -> list[str]:
+    """Derive extra search terms from the meeting title as a fallback.
+
+    Strategy:
+    1. Always include the raw title (truncated to 15 chars) so full-text search
+       can match documents that contain any fragment of it.
+    2. If the title contains delimiters, also add each segment as a separate term.
+
+    Skips terms that are identical to (or fully contained in) an existing keyword.
+    """
+    if not title:
+        return []
+    existing_lower = [kw.lower() for kw in existing]
+    chunks: list[str] = []
+    seen: set[str] = set()
+
+    def _add(term: str) -> None:
+        t = term.strip()
+        if len(t) < 2 or t.lower() in seen:
+            return
+        # Skip if an existing keyword already equals this term
+        if t.lower() in existing_lower:
+            return
+        seen.add(t.lower())
+        chunks.append(t)
+
+    # 1. Delimiter-split segments (handles titles like "飞书AI—产品专场·技术架构")
+    segments = re.split(r"[—\-·/ 　\t]+", title)
+    for part in segments:
+        _add(part)
+
+    # 2. For segments that are still long (no useful delimiters found, e.g. pure Chinese),
+    #    generate 4-char sliding-window chunks so full-text search can match shorter phrases.
+    for seg in segments:
+        # Strip ASCII/spaces from segment for Chinese-only chunking
+        chinese_only = re.sub(r"[A-Za-z0-9\s]+", "", seg)
+        if len(chinese_only) >= 8:  # Only worth chunking if long enough
+            for i in range(0, len(chinese_only) - 3, 2):
+                _add(chinese_only[i : i + 4])
+
+    return chunks
 
 
 def _build_wiki_url(node_token: str) -> str:

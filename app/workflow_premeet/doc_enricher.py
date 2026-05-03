@@ -18,7 +18,7 @@ from app.workflow_premeet.push_service import push_card_payload
 logger = logging.getLogger(__name__)
 
 _ENRICH_TOP_N = 3
-_MAX_CONTENT_CHARS = 3000
+_MAX_CONTENT_CHARS = 20000
 
 ENRICH_SYSTEM = """You are a meeting preparation assistant.
 Given a meeting title and a wiki document's content, extract the following in JSON:
@@ -26,7 +26,13 @@ Given a meeting title and a wiki document's content, extract the following in JS
   "why_relevant": "one sentence explaining why this doc matters for the meeting",
   "key_conclusions": ["conclusion 1", "conclusion 2"],
   "open_questions": ["question 1", "question 2"],
-  "anchor_url": "the most relevant section anchor URL, or null"
+  "anchor_url": "the most relevant section anchor URL, or null",
+  "excerpts": [
+    {
+      "section": "章节标题或来源位置（如'第二节：架构设计'）",
+      "content": "该段原文（最多300字，不要改写，如有列举项须完整保留所有条目）"
+    }
+  ]
 }
 
 Rules:
@@ -34,6 +40,7 @@ Rules:
 - key_conclusions: exactly 2 items. Each must be a complete standalone sentence (~25 Chinese characters) with 3 elements: (1) Subject/Topic: who or what this is about, (2) Result/State: what was achieved/found/decided, (3) Significance: why it matters for this meeting. Example: "RAG召回模块已完成改造，准确率提升至92%，是本次架构讨论的核心基线。"
 - open_questions: 1-2 items that this meeting should address, max 15 words each
 - anchor_url: null unless you see a direct anchor link in the content
+- excerpts: select 1-2 paragraphs from the document most relevant to the meeting topic. Preserve the original text verbatim (do not paraphrase). Mark the section title or location. If the paragraph contains enumerated items (①②③ or numbered lists), include ALL items completely — do not truncate mid-list.
 - **Language: respond in the same language as the meeting title. If the meeting title is Chinese, all text values must be in Chinese.**
 - Return ONLY valid JSON, no markdown fences
 """
@@ -104,6 +111,13 @@ async def _enrich_one(doc: WikiDoc, meeting_title: str) -> None:
     anchor = data.get("anchor_url")
     if anchor and isinstance(anchor, str):
         doc.anchor_url = anchor
+    excerpts = data.get("excerpts", [])
+    if excerpts:
+        doc.excerpt = "\n".join(
+            f"【{e.get('section', '节选')}】{e.get('content', '')}"
+            for e in excerpts[:2]
+            if isinstance(e, dict)
+        )
 
 
 async def _fetch_doc_content(obj_token: str) -> str:

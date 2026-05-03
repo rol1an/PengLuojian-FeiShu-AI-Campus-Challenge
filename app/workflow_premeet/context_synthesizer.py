@@ -10,6 +10,22 @@ from app.models import CalendarEvent, ChatMessage, ContextBullet, MeetingBrief, 
 logger = logging.getLogger(__name__)
 
 _CST = timezone(timedelta(hours=8))
+_PLACEHOLDER_RE = re.compile(r"^用户\d+$")
+
+
+def _best_name(sender_name: str, chat_name: str = "") -> str:
+    """Return the best non-placeholder display name.
+
+    Feishu assigns anonymous display names like '用户604098', '用户12345', etc.
+    to external/restricted users. When sender_name matches this pattern,
+    fall back to chat_name (DM chat titles typically equal the other party's
+    real display name from the calendar attendee list).
+    """
+    if sender_name and not _PLACEHOLDER_RE.match(sender_name):
+        return sender_name
+    if chat_name and not _PLACEHOLDER_RE.match(chat_name):
+        return chat_name
+    return sender_name  # return whatever we have, even if still a placeholder
 
 SELECT_SYSTEM = """You are a meeting preparation assistant.
 Given recent chat messages before a meeting, select the most relevant sentences.
@@ -50,7 +66,7 @@ Rules:
 - one_line: max 30 words, focus on the core purpose/decision, not just restate the title
 - context_bullets: exactly 3 items, each a natural complete sentence (~40-50 Chinese characters).
   Base them ONLY on the provided key sentences from recent chats.
-  Each bullet should include: (1) who is involved — ONLY use names or roles that explicitly appear in the key sentences, never invent roles like "产品侧"/"团队"/"用户", if no clear subject exists just omit it, (2) what is being discussed, (3) current status — where it's stuck or how far along.
+  Each bullet should include: (1) who is involved — ONLY use the exact name of a real person that explicitly appears in the key sentences. NEVER invent or generalize with role labels like "产品侧"/"团队"/"用户"/"相关人员"/"负责人"/"大家"/"各方". If no real person's name is present, start the bullet with the topic directly (omit the subject entirely), (2) what is being discussed, (3) current status — where it's stuck or how far along.
   Write like a human briefing a colleague, not a formal summary.
   "source_idx" must be the integer index (0-based) of the key sentence this bullet is most derived from.
   If no key sentences are provided, return [].
@@ -64,50 +80,68 @@ async def synthesize_brief(
     dm_messages: list[ChatMessage],
     group_messages: list[ChatMessage],
     docs: list[WikiDoc],
+    im_focus: str = "",
 ) -> MeetingBrief:
     """Synthesize a MeetingBrief from all available context. Degrades gracefully on failure."""
     key_docs = docs[:3]
 
     try:
         # Step 1: select key sentences from chat messages
-        selected = await _select_key_sentences(dm_messages, group_messages, event.title)
-        logger.info("Selected %d key sentences for '%s'", len(selected), event.title)
+        selected, is_llm_selected = await _select_key_sentences(
+            dm_messages, group_messages, event.title, im_focus=im_focus
+        )
+        logger.info("Selected %d key sentences for '%s' (llm=%s)", len(selected), event.title, is_llm_selected)
 
-        # Step 2: synthesize brief using selected sentences + doc context
-        user_msg = _build_user_message(event, selected, key_docs)
+        # Step 2: synthesize one_line and open_questions via LLM
+        user_msg = _build_user_message(event, selected if is_llm_selected else [], key_docs)
         raw = await call_llm(SYNTHESIZE_SYSTEM, user_msg)
         data = _parse_json_object(raw)
 
         one_line = data.get("one_line", "") or event.title
         open_questions = data.get("open_questions", [])
 
+        # Step 3: build context_bullets
+        # If LLM selected relevant sentences: let LLM synthesize bullets (existing logic)
+        # If fallback (non-relevant msgs): build bullets directly from raw messages, no LLM rewrite
         context_bullets: list[ContextBullet] = []
-        for bullet_data in data.get("context_bullets", []):
-            if isinstance(bullet_data, dict):
-                text = bullet_data.get("text", "")
-                source_idx = bullet_data.get("source_idx")
-            else:
-                text = str(bullet_data)
-                source_idx = None
 
-            source_label = ""
-            if source_idx is not None and 0 <= int(source_idx) < len(selected):
-                sel = selected[int(source_idx)]
+        if is_llm_selected and selected:
+            for bullet_data in data.get("context_bullets", []):
+                if isinstance(bullet_data, dict):
+                    text = bullet_data.get("text", "")
+                    source_idx = bullet_data.get("source_idx")
+                else:
+                    text = str(bullet_data)
+                    source_idx = None
+
+                source_label = ""
+                if source_idx is not None and 0 <= int(source_idx) < len(selected):
+                    sel = selected[int(source_idx)]
+                    t = sel.get("time", "")
+                    is_dm = sel.get("source") == "dm"
+                    if is_dm:
+                        name = _best_name(sel.get("chat_name", ""), sel.get("sender_name", ""))
+                        source_label = f"{t}与{name}（私聊）" if name else f"{t}（私聊）"
+                    else:
+                        name = _best_name(sel.get("sender_name", ""), sel.get("chat_name", ""))
+                        source_label = f"{t}来自{name}（群聊）" if name else f"{t}（群聊）"
+                if text:
+                    context_bullets.append(ContextBullet(text=text, source_label=source_label))
+        elif selected:
+            # Fallback: use raw message content verbatim, no LLM rewrite to avoid hallucination
+            for sel in selected:
                 t = sel.get("time", "")
                 is_dm = sel.get("source") == "dm"
+                text = sel.get("text", "").strip()
+                if not text:
+                    continue
                 if is_dm:
-                    chat_name = sel.get("chat_name", "") or sel.get("sender_name", "")
-                    if chat_name:
-                        source_label = f"{t}与{chat_name}（私聊）"
-                    else:
-                        source_label = f"{t}（私聊）"
+                    name = _best_name(sel.get("chat_name", ""), sel.get("sender_name", ""))
+                    source_label = f"{t}与{name}（私聊）" if name else f"{t}（私聊）"
                 else:
-                    sender_name = sel.get("sender_name", "")
-                    if sender_name:
-                        source_label = f"{t}来自{sender_name}（群聊）"
-                    else:
-                        source_label = f"{t}（群聊）"
-            context_bullets.append(ContextBullet(text=text, source_label=source_label))
+                    name = _best_name(sel.get("sender_name", ""), sel.get("chat_name", ""))
+                    source_label = f"{t}来自{name}（群聊）" if name else f"{t}（群聊）"
+                context_bullets.append(ContextBullet(text=text, source_label=source_label))
 
         return MeetingBrief(
             one_line=one_line,
@@ -125,19 +159,26 @@ async def _select_key_sentences(
     dm_messages: list[ChatMessage],
     group_messages: list[ChatMessage],
     meeting_title: str,
-) -> list[dict]:
+    im_focus: str = "",
+) -> tuple[list[dict], bool]:
     """Step 1: Ask LLM to pick the most meeting-relevant sentences from raw chat messages.
 
-    Returns items enriched with source metadata: time, sender_name, source (dm/group).
+    Returns (selected_items, is_llm_selected).
+    is_llm_selected=True means LLM found relevant sentences (safe for synthesis).
+    is_llm_selected=False means fallback to recent raw messages (use verbatim, no LLM rewrite).
     """
-    all_msgs = (dm_messages + group_messages)[:20]
+    # Interleave DM and group messages by timestamp so SELECT sees the most recent
+    # messages across both sources, rather than all DMs always appearing first.
+    all_msgs = sorted(dm_messages + group_messages, key=lambda m: m.timestamp, reverse=True)[:20]
     if not all_msgs:
-        return []
+        return [], False
     lines = [
         f"[{i}] [{m.timestamp.astimezone(_CST).strftime('%m-%d %H:%M')} {m.sender_name}] {m.content[:200]}"
         for i, m in enumerate(all_msgs)
     ]
     user_msg = f"Meeting: {meeting_title}\n\nMessages:\n" + "\n".join(lines)
+    if im_focus:
+        user_msg += f"\n\n== 本次会议的信息需求 ==\n{im_focus}\n在选句时，优先选择能回答上述信息需求的消息。"
     try:
         raw = await call_llm(SELECT_SYSTEM, user_msg)
         data = _parse_json_object(raw)
@@ -151,10 +192,26 @@ async def _select_key_sentences(
                 item["sender_name"] = msg.sender_name
                 item["source"] = msg.source
                 item["chat_name"] = msg.chat_name
-        return selected
+        if selected:
+            return selected, True
+        # Fallback: LLM found nothing relevant — use 3 most recent messages verbatim
+        logger.info("LLM selected 0 sentences, falling back to 3 most recent messages (verbatim)")
+        fallback_msgs = all_msgs[-3:]
+        fallback = []
+        for msg in fallback_msgs:
+            fallback.append({
+                "msg_idx": all_msgs.index(msg),
+                "text": msg.content[:100],
+                "reason": "近期消息",
+                "time": msg.timestamp.astimezone(_CST).strftime("%m月%d日 %H:%M"),
+                "sender_name": msg.sender_name,
+                "source": msg.source,
+                "chat_name": msg.chat_name,
+            })
+        return fallback, False
     except Exception as e:
         logger.debug("_select_key_sentences failed: %s", e)
-        return []
+        return [], False
 
 
 def _build_user_message(
@@ -174,7 +231,9 @@ def _build_user_message(
     if selected:
         lines.append("\n# Key sentences from recent chats")
         for s in selected:
-            lines.append(f'- "{s["text"]}" ({s.get("reason", "")})')
+            name = _best_name(s.get("sender_name", ""), s.get("chat_name", ""))
+            prefix = f"[{name}说] " if name else ""
+            lines.append(f'- {prefix}"{s["text"]}" ({s.get("reason", "")})')
 
     if key_docs:
         lines.append("\n# Related documents")

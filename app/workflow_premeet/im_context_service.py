@@ -48,50 +48,123 @@ async def get_dm_messages(
             as_identity="user",
             timeout=15,
         )
-        items = data.get("data", {}).get("messages", [])
-        messages: list[ChatMessage] = []
-        for item in items:
-            if item.get("deleted"):
-                continue
-            content = item.get("content", "").strip()
-            if not content:
-                continue
-            sender = item.get("sender", {})
-            ts_str = item.get("create_time", "")
-            try:
-                ts = datetime.strptime(ts_str, "%Y-%m-%d %H:%M").replace(tzinfo=_CST)
-            except (ValueError, TypeError):
-                ts = datetime.now(tz=timezone.utc)
-            messages.append(
-                ChatMessage(
-                    sender_open_id=sender.get("id", ""),
-                    sender_name=sender.get("name", "") or target_name,
-                    content=content,
-                    timestamp=ts,
-                    chat_id=target_open_id,
-                    source="dm",
-                    chat_name=target_name,
-                )
-            )
-        messages.sort(key=lambda m: m.timestamp, reverse=True)
-
-        # If target_name looks like an anonymous placeholder, try to find a better name
-        # from messages sent by the target (their sender_name may be more readable)
-        resolved_name = target_name
-        if _is_placeholder_name(target_name):
-            for m in messages:
-                if m.sender_open_id == target_open_id and m.sender_name and not _is_placeholder_name(m.sender_name):
-                    resolved_name = m.sender_name
-                    break
-        if resolved_name != target_name:
-            for m in messages:
-                if m.chat_name == target_name:
-                    m.chat_name = resolved_name
-
-        return messages[: settings.IM_CONTEXT_MAX_MESSAGES]
     except Exception as e:
+        err_str = str(e)
+        if "231204" in err_str or "b2c" in err_str:
+            logger.debug("get_dm_messages: b2c user %s, falling back to messages-search", target_open_id)
+            return await _get_dm_messages_via_search(target_open_id, target_name, days)
         logger.debug("get_dm_messages failed for %s: %s", target_open_id, e)
         return []
+
+    items = data.get("data", {}).get("messages", [])
+    messages = _parse_message_items(items, target_open_id, target_name, source="dm")
+    messages.sort(key=lambda m: m.timestamp, reverse=True)
+    _resolve_placeholder_name(messages, target_open_id, target_name)
+    return messages[: settings.IM_CONTEXT_MAX_MESSAGES]
+
+
+async def _get_dm_messages_via_search(
+    target_open_id: str,
+    target_name: str,
+    days: int,
+) -> list[ChatMessage]:
+    """Fallback for b2c external users: discover chat_id via messages-search, then fetch full conversation."""
+    start_cst = (datetime.now(tz=_CST) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S+08:00")
+    # Step 1: find the p2p chat_id by searching messages sent by target
+    try:
+        probe = await run_lark(
+            "im", "+messages-search",
+            "--sender", target_open_id,
+            "--start", start_cst,
+            "--page-size", "1",
+            as_identity="user",
+            timeout=15,
+        )
+    except Exception as e:
+        logger.debug("_get_dm_messages_via_search probe failed for %s: %s", target_open_id, e)
+        return []
+
+    probe_msgs = probe.get("data", {}).get("messages", [])
+    if not probe_msgs:
+        logger.debug("_get_dm_messages_via_search: no messages found for %s", target_open_id)
+        return []
+
+    chat_id = probe_msgs[0].get("chat_id", "")
+    if not chat_id:
+        return []
+
+    # Step 2: fetch full bidirectional conversation via chat_id
+    try:
+        data = await run_lark(
+            "im", "+messages-search",
+            "--chat-id", chat_id,
+            "--start", start_cst,
+            "--page-size", "50",
+            as_identity="user",
+            timeout=15,
+        )
+    except Exception as e:
+        logger.debug("_get_dm_messages_via_search chat fetch failed for %s: %s", chat_id, e)
+        return []
+
+    items = data.get("data", {}).get("messages", [])
+    messages = _parse_message_items(items, target_open_id, target_name, source="dm")
+    messages.sort(key=lambda m: m.timestamp, reverse=True)
+    _resolve_placeholder_name(messages, target_open_id, target_name)
+    logger.info("_get_dm_messages_via_search: fetched %d msgs for b2c user %s via chat %s", len(messages), target_open_id, chat_id)
+    return messages[: settings.IM_CONTEXT_MAX_MESSAGES]
+
+
+def _parse_message_items(
+    items: list,
+    target_open_id: str,
+    target_name: str,
+    source: str,
+) -> list[ChatMessage]:
+    messages: list[ChatMessage] = []
+    for item in items:
+        if item.get("deleted"):
+            continue
+        content = item.get("content", "").strip()
+        if not content:
+            continue
+        sender = item.get("sender", {})
+        ts_str = item.get("create_time", "")
+        try:
+            ts = datetime.strptime(ts_str, "%Y-%m-%d %H:%M").replace(tzinfo=_CST)
+        except (ValueError, TypeError):
+            ts = datetime.now(tz=timezone.utc)
+        messages.append(
+            ChatMessage(
+                sender_open_id=sender.get("id", ""),
+                sender_name=sender.get("name", "") or target_name,
+                content=content,
+                timestamp=ts,
+                chat_id=target_open_id,
+                source=source,
+                chat_name=target_name,
+            )
+        )
+    return messages
+
+
+def _resolve_placeholder_name(
+    messages: list[ChatMessage],
+    target_open_id: str,
+    target_name: str,
+) -> None:
+    """Replace placeholder display names (用户XXXXXX) with real names found in messages."""
+    if not _is_placeholder_name(target_name):
+        return
+    resolved_name = target_name
+    for m in messages:
+        if m.sender_open_id == target_open_id and m.sender_name and not _is_placeholder_name(m.sender_name):
+            resolved_name = m.sender_name
+            break
+    if resolved_name != target_name:
+        for m in messages:
+            if m.chat_name == target_name:
+                m.chat_name = resolved_name
 
 
 def _is_placeholder_name(name: str) -> bool:

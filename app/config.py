@@ -35,6 +35,10 @@ class Settings(BaseSettings):
 
     # Event subscription
     EVENT_FILTER: str = r"vc\.meeting"
+    IM_MESSAGE_FILTER: str = r"im\.message"
+
+    # Q&A Agent
+    QA_CONTEXT_TTL_SECONDS: int = 4 * 3600
 
     # IM context for pre-meeting
     IM_CONTEXT_DAYS: int = 14
@@ -42,6 +46,9 @@ class Settings(BaseSettings):
 
     # Task defaults
     TASK_DEFAULT_DUE_DAYS: int = 3
+
+    # Set to False to disable post-meeting task creation (safe mode for guest/demo users)
+    TASK_CREATION_ENABLED: bool = True
 
 
 settings = Settings()

@@ -1,6 +1,7 @@
 import asyncio
 import logging
 
+from app.config import settings
 from app.workflow_postmeet.minutes_service import get_meeting_record
 from app.workflow_postmeet.action_extractor import extract_action_items
 from app.workflow_postmeet.wiki_linker import enrich_with_wiki_links
@@ -54,6 +55,10 @@ async def _run_pipeline(meeting_id: str) -> None:
         meeting_title=record.title,
         meeting_summary=record.ai_summary,
     )
+
+    if not settings.TASK_CREATION_ENABLED:
+        logger.info("Task creation disabled (TASK_CREATION_ENABLED=False), skipping for '%s'", record.title)
+        return
 
     created = 0
     for item in items:

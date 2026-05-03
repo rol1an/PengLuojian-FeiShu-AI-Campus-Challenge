@@ -8,8 +8,10 @@ from pydantic import BaseModel
 
 from app.config import settings
 from app.workflow_premeet.scheduler import create_scheduler, _pushed_events, _run_premeet_pipeline
-from app.workflow_postmeet.event_listener import listen_for_meeting_end
 from app.workflow_postmeet.pipeline import handle_meeting_end_event, run_postmeet_pipeline_for_meeting
+from app.workflow_qa.qa_agent import handle_user_message
+from app.workflow_qa.context_store import context_store
+from app.event_dispatcher import listen_all_events
 
 logging.basicConfig(
     level=logging.INFO,
@@ -25,11 +27,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     scheduler.start()
     logger.info("Pre-meeting scheduler started (interval=%ds)", settings.PREMEET_POLL_INTERVAL)
 
-    # Start post-meeting event listener as background task
+    # Single unified event subscriber (lark-cli only allows one per app)
     event_task = asyncio.create_task(
-        listen_for_meeting_end(on_meeting_end=handle_meeting_end_event)
+        listen_all_events(
+            on_meeting_end=handle_meeting_end_event,
+            on_dm_message=handle_user_message,
+        )
     )
-    logger.info("Post-meeting event listener started")
+    logger.info("Unified event dispatcher started (meeting.end + im.message)")
 
     yield
 
@@ -55,7 +60,9 @@ async def health() -> dict:
 @app.get("/status")
 async def status() -> dict:
     return {
+        "pushed_events": sorted(_pushed_events),
         "pushed_events_count": len(_pushed_events),
+        "qa_context_count": context_store.size(),
         "premeet_push_minutes": settings.PREMEET_PUSH_MINUTES,
         "premeet_poll_interval": settings.PREMEET_POLL_INTERVAL,
         "llm_provider": settings.LLM_PROVIDER,

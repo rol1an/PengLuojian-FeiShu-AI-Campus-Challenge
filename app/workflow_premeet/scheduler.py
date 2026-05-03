@@ -8,7 +8,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from app.config import settings
 from app.models import CalendarEvent
 from app.workflow_premeet.calendar_service import get_upcoming_events
-from app.workflow_premeet.wiki_service import generate_keywords, search_wiki
+from app.workflow_premeet.wiki_service import analyze_meeting, search_wiki
 from app.workflow_premeet.push_service import push_knowledge_to_participants, push_card_payload
 from app.workflow_premeet.doc_enricher import enrich_and_repush, enrich_docs_inplace
 from app.workflow_premeet.im_context_service import (
@@ -54,10 +54,12 @@ async def premeet_check_job() -> None:
 
 
 async def _run_premeet_pipeline(event: CalendarEvent) -> None:
-    """Full pipeline: keywords → IM context → wiki search → enrich → synthesize → push brief card."""
+    """Full pipeline: meeting analysis → IM context → wiki search → enrich → synthesize → push brief card."""
     try:
-        keywords = await generate_keywords(event.title, event.description)
-        logger.info("Keywords for '%s': %s", event.title, keywords)
+        meeting_analysis = await analyze_meeting(event.title, event.description)
+        keywords = meeting_analysis["doc_search_queries"]
+        im_focus = meeting_analysis["im_focus"]
+        logger.info("Meeting analysis for '%s': %s", event.title, meeting_analysis)
 
         if not event.attendee_open_ids:
             logger.warning("No attendees found for event %s", event.event_id)
@@ -101,14 +103,28 @@ async def _run_premeet_pipeline(event: CalendarEvent) -> None:
             organizer_open_id=event.organizer_open_id,
         )
         logger.info("Found %d wiki docs for '%s'", len(docs), event.title)
+        for i, d in enumerate(docs[:3], 1):
+            logger.info("PUSH_LOG top%d: '%s' (node=%s)", i, d.title, d.node_token)
 
         # Enrich top 3 docs in-place (fills why_relevant, conclusions, questions)
         await enrich_docs_inplace(docs[:3], event.title)
 
         # Synthesize 4-source brief and push the new card format
-        brief = await synthesize_brief(event, dm_msgs, group_msgs, docs)
+        brief = await synthesize_brief(event, dm_msgs, group_msgs, docs, im_focus=im_focus)
+        logger.info("PUSH_LOG brief for '%s': one_line=%s, bullets=%d", event.title, brief.one_line, len(brief.context_bullets))
+        for b in brief.context_bullets:
+            logger.info("PUSH_LOG bullet: [%s] %s", b.source_label, b.text)
         payload = build_brief_card(event, brief)
         await push_card_payload(payload, event.attendee_open_ids, event.event_id, label="brief")
+
+        # Store meeting context so attendees can ask follow-up questions
+        from app.workflow_qa.context_store import context_store
+        for open_id in event.attendee_open_ids:
+            context_store.put(open_id, event, brief)
+        logger.info(
+            "Stored meeting context for %d attendees (event=%s)",
+            len(event.attendee_open_ids), event.event_id,
+        )
 
     except Exception as e:
         logger.error("Pre-meeting push pipeline failed for %s: %s", event.event_id, e)
