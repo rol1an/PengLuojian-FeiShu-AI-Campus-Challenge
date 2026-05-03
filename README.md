@@ -35,6 +35,17 @@
 
 ![会前同步卡](picture_data/new_premeetexample1.png)
 
+### 会中：Q&A 会议助手追问
+
+收到「会前同步卡」后，可在机器人私聊中直接追问会议相关问题。助手会实时从知识库检索相关文档，结合近期私聊/群聊记录给出回答，并内联注明来源（文档附链接，私聊说联系人）。
+
+**核心机制**：
+- **章节级精准检索**：对文档按标题切分章节，用问题关键词打分，只取最相关的章节（≤ 3000 字）传入 LLM，避免长文档被位置截断截掉关键内容
+- **来源可追溯**：文档来源自动附链接，私聊来源注明联系人姓名，群聊来源注明群名
+- **自然汇报风格**：回答遵循「先结论→再来源→最后收口」的隐含顺序，而非固定结构化模板
+
+![Q&A 会议助手](picture_data/Q&AAgent.png)
+
 ### 服务运行日志
 
 服务每 60 秒轮询日历，自动触发关键词提取 → Wiki 搜索 → LLM 重排 → 文档富化 → 卡片推送全流程。
@@ -71,7 +82,15 @@
   → LLM 两步上下文提炼（SELECT 关键句 → SYNTHESIZE 自然句 + 溯源标签）
   → 会前同步卡推送给参会人
 
-工作流 2 · 会后处理
+工作流 2 · 会中 Q&A
+用户在机器人私聊发送问题（im.message 事件监听）
+  → 从 context_store 读取会前简报（TTL 4 小时）
+  → 实时 wiki 搜索（用问题作为关键词）
+       → 章节级精准提取（按标题切分 → 关键词打分 → top 章节 ≤ 3000 字）
+  → 融合会前简报 + 实时检索内容
+  → LLM 生成自然语言回答（先结论→来源内联→收口）
+
+工作流 3 · 会后处理
 飞书 vc.meeting.end 事件（WebSocket 监听）
   → 拉取会议转写 / 妙记
   → LLM 提取 Action Items（结构化 JSON）
@@ -151,7 +170,18 @@ curl -X POST http://localhost:8080/debug/trigger-postmeet \
 - **Key Materials**: Top 3 relevant docs with 📄 relevance note + 📌 key conclusion
 - **Open Questions**: 1-3 unresolved points LLM extracted from context
 
-![Pre-meeting Briefing Card](picture_data/premeetexample1.png)
+![Pre-meeting Briefing Card](picture_data/new_premeetexample1.png)
+
+### In-meeting: Q&A Follow-up Assistant
+
+After receiving the briefing card, attendees can ask follow-up questions directly in the bot's DM chat. The assistant performs real-time wiki search, combines knowledge base results with recent chat history, and replies with inline source attribution.
+
+**How it works**:
+- **Section-level retrieval**: Splits documents by heading, scores each section against the question's keywords, and passes only the most relevant sections (≤ 3,000 chars) to the LLM — ensuring long documents don't get truncated before the relevant part
+- **Traceable sources**: Document sources include clickable links; DM sources name the contact; group chat sources name the group
+- **Natural reporting style**: Answers follow an implicit order — conclusion first, then source attribution, then a closing remark — rather than a rigid templated format
+
+![Q&A Meeting Assistant](picture_data/Q&AAgent.png)
 
 ### Service Logs
 
@@ -189,7 +219,15 @@ Feishu Calendar (APScheduler polling, triggers 25 min before meeting)
   → Two-step LLM context synthesis (SELECT key sentences → SYNTHESIZE natural bullets + source labels)
   → Push briefing card to all attendees
 
-Workflow 2 · Post-meeting Processing
+Workflow 2 · In-meeting Q&A
+User sends a question in bot DM (im.message event listener)
+  → Load pre-meeting brief from context_store (TTL 4h)
+  → Real-time wiki search (question as keyword)
+       → Section-level extraction (split by heading → keyword scoring → top sections ≤ 3,000 chars)
+  → Merge pre-meeting brief + live search results
+  → LLM generates natural-language reply (conclusion → inline sources → closing)
+
+Workflow 3 · Post-meeting Processing
 Feishu vc.meeting.end event (WebSocket listener)
   → Fetch meeting transcript / minutes
   → LLM Action Item extraction (structured JSON)
