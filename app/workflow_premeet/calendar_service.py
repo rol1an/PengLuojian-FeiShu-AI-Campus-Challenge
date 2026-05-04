@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import time
@@ -6,6 +7,7 @@ from datetime import datetime, timezone
 from app.config import settings
 from app.lark import run_lark
 from app.models import CalendarEvent
+from app.workflow_premeet.im_context_service import extract_chat_id_from_description
 
 logger = logging.getLogger(__name__)
 
@@ -32,14 +34,24 @@ async def get_upcoming_events(lookahead_hours: int | None = None) -> list[Calend
         as_identity="user",
     )
 
+    items = data.get("data", {}).get("items", [])
+    attendee_results = await asyncio.gather(
+        *[_get_attendee_info(item["event_id"]) for item in items]
+    )
     events: list[CalendarEvent] = []
-    for item in data.get("data", {}).get("items", []):
-        attendee_ids, attendee_names = await _get_attendee_info(item["event_id"])
+    for item, (attendee_ids, attendee_names) in zip(items, attendee_results):
+        description = item.get("description", "")
+        # Prefer explicit chat_id field from API; fall back to parsing description
+        bound_chat_id = (
+            item.get("chat_id", "")
+            or extract_chat_id_from_description(description)
+            or ""
+        )
         events.append(
             CalendarEvent(
                 event_id=item["event_id"],
                 title=item.get("summary", ""),
-                description=item.get("description", ""),
+                description=description,
                 start_time=datetime.fromtimestamp(
                     int(item["start_time"]["timestamp"]), tz=timezone.utc
                 ),
@@ -49,6 +61,7 @@ async def get_upcoming_events(lookahead_hours: int | None = None) -> list[Calend
                 attendee_open_ids=attendee_ids,
                 organizer_open_id=item.get("event_organizer", {}).get("user_id", ""),
                 attendee_names=attendee_names,
+                bound_chat_id=bound_chat_id,
             )
         )
     return events

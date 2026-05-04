@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     # IM context for pre-meeting
     IM_CONTEXT_DAYS: int = 14
     IM_CONTEXT_MAX_MESSAGES: int = 10
+    MY_OPEN_ID: str = ""  # self open_id to exclude from DM targets
 
     # Task defaults
     TASK_DEFAULT_DUE_DAYS: int = 3

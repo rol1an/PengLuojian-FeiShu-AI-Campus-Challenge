@@ -123,6 +123,7 @@ async def search_wiki(
     for kw in all_keywords:
         try:
             items = await _search_one_raw(kw)
+            logger.info("Wiki raw hits for '%s': %s", kw, [i.get("title") for i in items])
             for item in items:
                 node_token = item.get("node_token", "")
                 if node_token and node_token not in seen:
@@ -149,7 +150,7 @@ async def search_wiki(
         if q >= settings.WIKI_QUALITY_THRESHOLD:
             scored.append((item, q, r))
         else:
-            logger.debug(
+            logger.info(
                 "Layer1 filtered out '%s' (quality=%.2f)", item.get("title", "?"), q
             )
 
@@ -164,6 +165,7 @@ async def search_wiki(
     candidates = [_item_to_doc(item) for item, _q, _r in top]
 
     # Dedup before rerank so duplicates don't consume slots
+    candidates = _dedup_by_version(candidates)
     candidates = await _dedup_similar_docs(candidates)
 
     if len(candidates) <= settings.WIKI_MAX_DOCS:
@@ -257,6 +259,80 @@ Rules:
 - Each group must have at least 2 node_tokens
 - If no duplicates exist, return {"duplicate_groups": []}
 """
+
+
+# Patterns that mark a version suffix — order matters: more specific first
+_VERSION_SUFFIX_RE = re.compile(
+    r"[\s\-_·]*("
+    r"[vV]\d+(\.\d+)*"           # v1, v2, v1.0, v2.3.1
+    r"|\d+\.\d+(\.\d+)*"         # 1.0, 1.1.0
+    r"|第[一二三四五六七八九十百千]+版"  # 第一版, 第二版
+    r"|[①②③④⑤⑥⑦⑧⑨⑩]"         # circled numbers
+    r"|1️⃣|2️⃣|3️⃣|4️⃣|5️⃣|6️⃣|7️⃣|8️⃣|9️⃣"  # keycap emoji
+    r"|\(\d+\)"                   # (1), (2)
+    r"|_\d+|\s\d+$"              # _1, _2, trailing space+digit
+    r")$"
+)
+
+
+def _base_title(title: str) -> str:
+    """Strip version suffix and return the base title for grouping."""
+    return _VERSION_SUFFIX_RE.sub("", title).strip()
+
+
+def _version_sort_key(title: str) -> tuple:
+    """Extract a sortable version key from a title suffix.
+
+    Returns a tuple so that higher versions sort last (we want max).
+    Examples: v2 → (2,), v1.2.3 → (1,2,3), 第二版 → (2,), 2️⃣ → (2,), no version → (0,)
+    """
+    _CN_NUM = {"一":1,"二":2,"三":3,"四":4,"五":5,"六":6,"七":7,"八":8,"九":9,"十":10}
+    _EMOJI_NUM = {"1️⃣":1,"2️⃣":2,"3️⃣":3,"4️⃣":4,"5️⃣":5,"6️⃣":6,"7️⃣":7,"8️⃣":8,"9️⃣":9}
+    _CIRCLE_NUM = {"①":1,"②":2,"③":3,"④":4,"⑤":5,"⑥":6,"⑦":7,"⑧":8,"⑨":9,"⑩":10}
+
+    m = _VERSION_SUFFIX_RE.search(title)
+    if not m:
+        return (0,)
+    token = m.group(1).strip()
+
+    # v2, v1.2.3, 1.0, 1.1.0
+    digits = re.findall(r"\d+", token)
+    if digits:
+        return tuple(int(d) for d in digits)
+    # 第X版
+    cn = re.search(r"第([一二三四五六七八九十]+)版", token)
+    if cn:
+        return (_CN_NUM.get(cn.group(1), 0),)
+    # emoji / circled
+    for d, v in {**_EMOJI_NUM, **_CIRCLE_NUM}.items():
+        if d in token:
+            return (v,)
+    return (0,)
+
+
+def _dedup_by_version(docs: list[WikiDoc]) -> list[WikiDoc]:
+    """Rule-based: group docs by base title, keep only the highest-versioned doc in each group."""
+    from collections import defaultdict
+    groups: dict[str, list[WikiDoc]] = defaultdict(list)
+    for doc in docs:
+        groups[_base_title(doc.title)].append(doc)
+
+    result: list[WikiDoc] = []
+    for base, group in groups.items():
+        if len(group) == 1:
+            result.append(group[0])
+            continue
+        group.sort(key=lambda d: _version_sort_key(d.title), reverse=True)
+        result.append(group[0])
+        for old in group[1:]:
+            logger.info(
+                "Version-dedup: keeping '%s', removing '%s'",
+                group[0].title, old.title,
+            )
+    # Preserve original ordering for non-duplicate docs
+    order = {d.node_token: i for i, d in enumerate(docs)}
+    result.sort(key=lambda d: order.get(d.node_token, 0))
+    return result
 
 
 async def _dedup_similar_docs(docs: list[WikiDoc]) -> list[WikiDoc]:

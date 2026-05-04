@@ -24,9 +24,9 @@
 
 **四路信息融合**：
 1. 会议基础信息（标题 / 议程 / 参会人 / 发起人）
-2. 当前用户与所有参会人的私聊 DM（近 14 天，最新 10 条）
-3. 会议邀请群聊的上下文（从邀请描述中提取 openChatId，近 7 天）
-4. 知识库文档（质量过滤 → 语义精排 → 文档富化 → LLM 去重）
+2. 当前用户与所有参会人的私聊 DM（近 14 天，最新 10 条；外部/b2c 用户自动 fallback 到消息搜索）
+3. 会议绑定群聊的上下文（优先读取日历 API `chat_id` 字段及 applink `openId=oc_xxx`，无绑定时按关键词搜索最相关群，近 7 天）
+4. 知识库文档（质量过滤 → 版本去重保留最新版 → LLM 语义精排 → 文档富化 → LLM 内容去重）
 
 **卡片三段式结构**：
 - **最近上下文**：LLM 两步提炼——先从原始消息中选 3-5 句最相关原句，再改写成 40-50 字自然句（含主体 + 进展），每条附 📅 溯源标签（时间 + 来源对话/群聊）
@@ -74,10 +74,11 @@
       ├─ 会议群聊上下文（近 7 天）
       └─ 知识库文档
             → LLM 关键词提取
-            → docs +search 全文搜索
+            → docs +search 全文搜索（含标题滑窗兜底）
             → 质量过滤（时效 / 类型 / 标题 / 发起人加成）
+            → 版本去重（正则识别 v1/v2、第一版/第二版、①②、1️⃣2️⃣ 等，保留最高版本）
             → LLM 语义精排（0-10 分）
-            → LLM 去重（跨知识库相同内容只留最新版）
+            → LLM 内容去重（跨知识库相同内容只留最新版）
             → 文档正文富化（关键结论 / 待确认问题）
   → LLM 两步上下文提炼（SELECT 关键句 → SYNTHESIZE 自然句 + 溯源标签）
   → 会前同步卡推送给参会人
@@ -121,6 +122,7 @@ cp .env.example .env
 # DOUBAO_API_KEY=your_api_key
 # LLM_MODEL=your_endpoint_id
 # WIKI_SPACE_ID=your_wiki_space_id
+# MY_OPEN_ID=your_own_open_id   # 排除自身，避免 DM 误查自己
 ```
 
 **3. 启动服务**
@@ -161,9 +163,9 @@ curl -X POST http://localhost:8080/debug/trigger-postmeet \
 
 **Four information sources (concurrent)**:
 1. Meeting basics (title / agenda / attendees / organizer)
-2. Direct message history with all attendees (last 14 days, top 10 messages)
-3. Group chat context from the meeting invite (last 7 days, if a group link is embedded)
-4. Knowledge base documents (quality filter → semantic reranking → enrichment → deduplication)
+2. DM history with all attendees (last 14 days, top 10 messages; external/b2c users fall back to message search)
+3. Bound group chat context (reads `chat_id` from calendar API or applink `openId=oc_xxx`; falls back to keyword-based group discovery when no link is present; last 7 days)
+4. Knowledge base documents (quality filter → version dedup keeping latest → LLM semantic reranking → enrichment → LLM content dedup)
 
 **Three-section card structure**:
 - **Recent Context**: Two-step LLM synthesis — select 3-5 most relevant sentences from raw messages, then rewrite each into a 40-50 char natural sentence (subject + content + status), with a 📅 source label (timestamp + DM partner / group name)
@@ -211,10 +213,11 @@ Feishu Calendar (APScheduler polling, triggers 25 min before meeting)
       ├─ Meeting group chat context (last 7 days)
       └─ Knowledge base docs
             → LLM keyword extraction
-            → docs +search full-text search
+            → docs +search full-text search (with sliding-window title fallback)
             → Quality filter (recency / type / title / organizer boost)
+            → Version dedup (regex strips v1/v2, 第一版/第二版, ①②, 1️⃣2️⃣ etc.; keeps highest version)
             → LLM semantic reranking (0-10 score)
-            → LLM deduplication (keep newest across knowledge spaces)
+            → LLM content dedup (keep newest copy across knowledge spaces)
             → Document enrichment (conclusions / open questions)
   → Two-step LLM context synthesis (SELECT key sentences → SYNTHESIZE natural bullets + source labels)
   → Push briefing card to all attendees
@@ -258,6 +261,7 @@ cp .env.example .env
 # DOUBAO_API_KEY=your_api_key
 # LLM_MODEL=your_endpoint_id
 # WIKI_SPACE_ID=your_wiki_space_id
+# MY_OPEN_ID=your_own_open_id   # exclude yourself from DM targets
 ```
 
 **3. Start the service**

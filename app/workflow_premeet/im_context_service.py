@@ -20,11 +20,18 @@ def extract_chat_id_from_description(description: str) -> str | None:
         r"openChatId=([A-Za-z0-9_-]+)",
         r"chat_id=([A-Za-z0-9_-]+)",
         r"/chat/open\?[^\"'\s]*openChatId=([A-Za-z0-9_-]+)",
+        # applink format: openId=oc_xxx (require oc_ prefix to avoid matching user open IDs)
+        r"openId=(oc_[A-Za-z0-9_-]+)",
     ]
     for pattern in patterns:
         m = re.search(pattern, description)
         if m:
             return m.group(1)
+    if description.strip():
+        logger.debug(
+            "extract_chat_id_from_description: no chat ID found. description snippet: %.200s",
+            description,
+        )
     return None
 
 
@@ -49,12 +56,8 @@ async def get_dm_messages(
             timeout=15,
         )
     except Exception as e:
-        err_str = str(e)
-        if "231204" in err_str or "b2c" in err_str:
-            logger.debug("get_dm_messages: b2c user %s, falling back to messages-search", target_open_id)
-            return await _get_dm_messages_via_search(target_open_id, target_name, days)
-        logger.debug("get_dm_messages failed for %s: %s", target_open_id, e)
-        return []
+        logger.info("get_dm_messages failed for %s (%s), falling back to messages-search", target_open_id, e)
+        return await _get_dm_messages_via_search(target_open_id, target_name, days)
 
     items = data.get("data", {}).get("messages", [])
     messages = _parse_message_items(items, target_open_id, target_name, source="dm")
@@ -86,11 +89,15 @@ async def _get_dm_messages_via_search(
 
     probe_msgs = probe.get("data", {}).get("messages", [])
     if not probe_msgs:
-        logger.debug("_get_dm_messages_via_search: no messages found for %s", target_open_id)
+        logger.info("_get_dm_messages_via_search: no messages found for %s", target_open_id)
         return []
 
     chat_id = probe_msgs[0].get("chat_id", "")
     if not chat_id:
+        return []
+    # oc_ prefix means group chat — not a DM, abort to avoid mislabeling group msgs as DM
+    if chat_id.startswith("oc_"):
+        logger.info("_get_dm_messages_via_search: chat %s is a group chat, skipping for %s", chat_id, target_open_id)
         return []
 
     # Step 2: fetch full bidirectional conversation via chat_id
@@ -179,16 +186,85 @@ async def get_group_messages(
     chat_id: str,
     days: int | None = None,
     name_map: dict[str, str] | None = None,
+    keywords: list[str] | None = None,
 ) -> list[ChatMessage]:
-    """Fetch recent group chat messages."""
-    if not chat_id:
-        return []
+    """Fetch recent group chat messages.
+
+    If chat_id is empty and keywords are provided, falls back to searching
+    group chats by keyword to discover the relevant chat_id.
+    """
     days = days or 7
+    if not chat_id:
+        if keywords:
+            return await _search_group_by_keywords(keywords, days, name_map or {})
+        return []
     try:
         messages = await _fetch_recent_messages(chat_id, days, source="group", name_map=name_map or {})
         return messages[: settings.IM_CONTEXT_MAX_MESSAGES]
     except Exception as e:
         logger.debug("get_group_messages failed for chat %s: %s", chat_id, e)
+        return []
+
+
+async def _search_group_by_keywords(
+    keywords: list[str],
+    days: int,
+    name_map: dict[str, str],
+) -> list[ChatMessage]:
+    """Fallback: discover relevant group chat via keyword search when no chat_id in calendar.
+
+    Strategy:
+    1. Search messages in group chats for each keyword
+    2. Pick the chat_id with the most keyword hits (most relevant group)
+    3. Fetch full recent messages from that chat
+    """
+    chat_hit_count: dict[str, int] = {}
+    chat_name_map: dict[str, str] = {}
+
+    for kw in keywords[:3]:  # limit to top 3 keywords to avoid rate limits
+        try:
+            data = await run_lark(
+                "im", "+messages-search",
+                "--query", kw,
+                "--chat-type", "group",
+                "--page-size", "10",
+                as_identity="user",
+                timeout=15,
+            )
+        except Exception as e:
+            logger.debug("_search_group_by_keywords failed for kw='%s': %s", kw, e)
+            continue
+
+        for msg in data.get("data", {}).get("messages", []):
+            cid = msg.get("chat_id", "")
+            cname = msg.get("chat_name", "")
+            if cid:
+                chat_hit_count[cid] = chat_hit_count.get(cid, 0) + 1
+                if cname:
+                    chat_name_map[cid] = cname
+
+    if not chat_hit_count:
+        logger.debug("_search_group_by_keywords: no group chats found for keywords=%s", keywords)
+        return []
+
+    # Pick the group with the most keyword hits
+    best_chat_id = max(chat_hit_count, key=lambda c: chat_hit_count[c])
+    best_chat_name = chat_name_map.get(best_chat_id, "")
+    logger.info(
+        "Group chat discovered via keyword search: '%s' (chat_id=%s, hits=%d)",
+        best_chat_name, best_chat_id, chat_hit_count[best_chat_id],
+    )
+
+    try:
+        messages = await _fetch_recent_messages(
+            best_chat_id, days, source="group", name_map=name_map,
+        )
+        for m in messages:
+            if not m.chat_name:
+                m.chat_name = best_chat_name
+        return messages[: settings.IM_CONTEXT_MAX_MESSAGES]
+    except Exception as e:
+        logger.debug("_search_group_by_keywords fetch failed for chat %s: %s", best_chat_id, e)
         return []
 
 

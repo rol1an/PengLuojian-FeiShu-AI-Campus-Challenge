@@ -12,7 +12,6 @@ from app.workflow_premeet.wiki_service import analyze_meeting, search_wiki
 from app.workflow_premeet.push_service import push_knowledge_to_participants, push_card_payload
 from app.workflow_premeet.doc_enricher import enrich_and_repush, enrich_docs_inplace
 from app.workflow_premeet.im_context_service import (
-    extract_chat_id_from_description,
     get_dm_messages,
     get_group_messages,
 )
@@ -21,12 +20,22 @@ from app.workflow_premeet.card_builder import build_brief_card
 
 logger = logging.getLogger(__name__)
 
-# In-memory set of already-pushed (event_id, push_minutes) keys — prevents duplicate pushes
-_pushed_events: set[str] = set()
+# In-memory dict of already-pushed keys → meeting start_time, for dedup and GC
+_pushed_events: dict[str, datetime] = {}
+
+_PUSHED_EVENTS_TTL = timedelta(hours=2)  # clean up keys this long after meeting start
 
 
 def _push_key(event_id: str) -> str:
     return f"{event_id}:{settings.PREMEET_PUSH_MINUTES}"
+
+
+def _gc_pushed_events(now: datetime) -> None:
+    expired = [k for k, start in _pushed_events.items() if now - start > _PUSHED_EVENTS_TTL]
+    for k in expired:
+        del _pushed_events[k]
+    if expired:
+        logger.debug("GC: removed %d expired push keys", len(expired))
 
 
 async def premeet_check_job() -> None:
@@ -36,6 +45,8 @@ async def premeet_check_job() -> None:
     """
     now = datetime.now(tz=timezone.utc)
     push_threshold = timedelta(minutes=settings.PREMEET_PUSH_MINUTES)
+
+    _gc_pushed_events(now)
 
     try:
         events = await get_upcoming_events()
@@ -48,7 +59,7 @@ async def premeet_check_job() -> None:
         time_until_start = event.start_time - now
 
         if timedelta(0) < time_until_start <= push_threshold and key not in _pushed_events:
-            _pushed_events.add(key)
+            _pushed_events[key] = event.start_time
             logger.info("Triggering pre-meeting push for: %s", event.title)
             asyncio.create_task(_run_premeet_pipeline(event))
 
@@ -66,17 +77,18 @@ async def _run_premeet_pipeline(event: CalendarEvent) -> None:
             return
 
         # Fetch IM context in parallel (all fail silently)
-        chat_id = extract_chat_id_from_description(event.description)
+        chat_id = event.bound_chat_id
+        logger.info("IM group chat for '%s': chat_id=%r", event.title, chat_id or "(none, will keyword-search)")
         name_map = event.attendee_names  # open_id → display_name
         # DM targets: organizer + all other attendees (deduped, exclude self)
         dm_targets = list({
             uid for uid in [event.organizer_open_id] + event.attendee_open_ids
-            if uid
+            if uid and uid != settings.MY_OPEN_ID
         })
         dm_tasks = [get_dm_messages(uid, target_name=name_map.get(uid, "")) for uid in dm_targets]
         dm_results = await asyncio.gather(
             *dm_tasks,
-            get_group_messages(chat_id, name_map=name_map) if chat_id else _empty_list(),
+            get_group_messages(chat_id, name_map=name_map, keywords=keywords),
         )
         group_msgs = dm_results[-1]
         # Merge DM messages from all targets, deduplicate by content+timestamp, keep newest-first

@@ -37,6 +37,7 @@ class CalendarEvent:
     attendee_open_ids: list[str]
     organizer_open_id: str
     attendee_names: dict[str, str] = field(default_factory=dict)  # open_id → display_name
+    bound_chat_id: str = ""  # group chat directly bound to this event (from API field or description)
 
 
 @dataclass
