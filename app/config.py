@@ -33,6 +33,17 @@ class Settings(BaseSettings):
     WIKI_QUALITY_THRESHOLD: float = 0.3
     WIKI_CONFIDENCE_THRESHOLD: float = 5.0
 
+    # Vector / hybrid search
+    VECTOR_SEARCH_ENABLED: bool = True
+    DOUBAO_EMBEDDING_MODEL: str = ""       # Doubao embedding endpoint ID, e.g. ep-xxxx-embed
+    DOUBAO_EMBEDDING_API_KEY: str = ""     # separate API key for embedding endpoint (if different from DOUBAO_API_KEY)
+    EMBEDDING_DIMS: int = 2048             # doubao-embedding-large default dims
+    EMBEDDING_CACHE_TTL_DAYS: int = 7
+    VECTOR_TOP_K: int = 5                 # max extra docs vector path adds to candidate pool
+    # Offline index
+    INDEX_MAX_DOCS: int = 200             # max docs to crawl per rebuild
+    INDEX_RECENT_DAYS: int = 90           # only index docs updated within N days
+
     # Event subscription
     EVENT_FILTER: str = r"vc\.meeting"
     IM_MESSAGE_FILTER: str = r"im\.message"

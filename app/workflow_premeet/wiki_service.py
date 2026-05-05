@@ -139,6 +139,26 @@ async def search_wiki(
     if not raw_candidates:
         return []
 
+    # ── Vector recall path (parallel to keyword, fails silently) ─────────────
+    import app.persistence as _db
+    if settings.VECTOR_SEARCH_ENABLED and _db.doc_index_count() > 0:
+        try:
+            from app.workflow_premeet.vector_search import embed_query, vector_recall
+            q_vec = await embed_query(title, description, keywords)
+            kw_tokens = {item["node_token"] for item in raw_candidates if item.get("node_token")}
+            extra_items = await vector_recall(
+                q_vec, exclude_tokens=kw_tokens, top_k=settings.VECTOR_TOP_K
+            )
+            if extra_items:
+                raw_candidates.extend(extra_items)
+                logger.info(
+                    "Vector recall: +%d extra docs (index_size=%d)",
+                    len(extra_items), _db.doc_index_count(),
+                )
+        except Exception as e:
+            logger.warning("Vector search failed, using keyword-only candidates: %s", e)
+    # ─────────────────────────────────────────────────────────────────────────
+
     # Layer 1: compute quality + relevance scores, filter by quality threshold
     scored: list[tuple[dict, float, float]] = []
     for item in raw_candidates:

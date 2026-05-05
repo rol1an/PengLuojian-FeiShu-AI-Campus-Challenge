@@ -72,12 +72,16 @@ async def run_lark(
 async def stream_lark_events(
     *args: str,
     as_identity: str = "bot",
+    force: bool = False,
 ) -> asyncio.subprocess.Process:
     """
     Start a long-running lark-cli event +subscribe process.
     Returns the process; caller reads stdout line-by-line.
+    force=True adds --force to evict any existing subscriber for this app.
     """
     cmd = [settings.LARK_CLI_PATH, "event", "+subscribe", "--as", as_identity, *args]
+    if force:
+        cmd.append("--force")
     logger.info("Starting lark event stream: %s", shlex.join(cmd))
     return await asyncio.create_subprocess_exec(
         *cmd,

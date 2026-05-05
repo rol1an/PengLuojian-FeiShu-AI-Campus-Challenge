@@ -14,6 +14,8 @@
 
 **飞书 AI 校园挑战赛 · OpenClaw 赛道参赛项目**
 
+![项目概览](picture_data/projectalbum.png)
+
 </div>
 
 ## 功能演示
@@ -33,8 +35,7 @@
 - **关键材料**：top 3 相关文档，含 📄 相关说明 + 📌 关键结论
 - **待确认问题**：LLM 从上下文中提炼 1-3 条需在会中解决的问题
 
-![会前同步卡](picture_data/new_premeetexample1.png)
-
+### 会中：Q&A 会议助手追问
 
 收到「会前同步卡」后，可在机器人私聊中直接追问会议相关问题。助手会实时从知识库检索相关文档，结合近期私聊/群聊记录给出回答，并内联注明来源（文档附链接，私聊说联系人）。
 
@@ -154,6 +155,8 @@ curl -X POST http://localhost:8080/debug/trigger-postmeet \
 
 **Feishu AI Campus Challenge · OpenClaw Track**
 
+![Project Overview](picture_data/projectalbum.png)
+
 </div>
 
 ## Demo
@@ -172,8 +175,6 @@ curl -X POST http://localhost:8080/debug/trigger-postmeet \
 - **Recent Context**: Two-step LLM synthesis — select 3-5 most relevant sentences from raw messages, then rewrite each into a 40-50 char natural sentence (subject + content + status), with a 📅 source label (timestamp + DM partner / group name)
 - **Key Materials**: Top 3 relevant docs with 📄 relevance note + 📌 key conclusion
 - **Open Questions**: 1-3 unresolved points LLM extracted from context
-
-![Pre-meeting Briefing Card](picture_data/new_premeetexample1.png)
 
 ### In-meeting: Q&A Follow-up Assistant
 

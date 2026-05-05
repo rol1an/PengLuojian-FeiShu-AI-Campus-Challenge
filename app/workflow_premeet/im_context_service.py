@@ -73,13 +73,15 @@ async def _get_dm_messages_via_search(
 ) -> list[ChatMessage]:
     """Fallback for b2c external users: discover chat_id via messages-search, then fetch full conversation."""
     start_cst = (datetime.now(tz=_CST) - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%S+08:00")
-    # Step 1: find the p2p chat_id by searching messages sent by target
+    # Step 1: find the p2p chat_id by searching messages sent by target.
+    # Use page-size > 1 so that if the first result is a group chat (oc_), we can
+    # still find the real p2p DM further in the list.
     try:
         probe = await run_lark(
             "im", "+messages-search",
             "--sender", target_open_id,
             "--start", start_cst,
-            "--page-size", "1",
+            "--page-size", "10",
             as_identity="user",
             timeout=15,
         )
@@ -92,12 +94,19 @@ async def _get_dm_messages_via_search(
         logger.info("_get_dm_messages_via_search: no messages found for %s", target_open_id)
         return []
 
-    chat_id = probe_msgs[0].get("chat_id", "")
+    # Scan all probe results for the first non-group (p2p) chat_id.
+    # oc_ prefix means group chat — skip to avoid mislabeling group msgs as DM.
+    chat_id = ""
+    for msg in probe_msgs:
+        cid = msg.get("chat_id", "")
+        if cid and not cid.startswith("oc_"):
+            chat_id = cid
+            break
     if not chat_id:
-        return []
-    # oc_ prefix means group chat — not a DM, abort to avoid mislabeling group msgs as DM
-    if chat_id.startswith("oc_"):
-        logger.info("_get_dm_messages_via_search: chat %s is a group chat, skipping for %s", chat_id, target_open_id)
+        logger.info(
+            "_get_dm_messages_via_search: no p2p chat found for %s (all %d probe results are group chats)",
+            target_open_id, len(probe_msgs),
+        )
         return []
 
     # Step 2: fetch full bidirectional conversation via chat_id

@@ -16,7 +16,8 @@ from app.lark import stream_lark_events
 logger = logging.getLogger(__name__)
 
 OnMeetingEndCallback = Callable[[dict], Awaitable[None]]
-OnMessageCallback = Callable[[str, str], Awaitable[None]]
+OnMessageCallback = Callable[[str, str, str], Awaitable[None]]  # (open_id, text, message_id)
+OnCardActionCallback = Callable[[str, dict], Awaitable[None]]   # (operator_open_id, action_value)
 
 # ── Meeting-end dedup ────────────────────────────────────────────────────────
 _MEETING_DEDUP_TTL = 300  # 5 minutes
@@ -34,9 +35,16 @@ async def _guarded_meeting(cb: OnMeetingEndCallback, event: dict) -> None:
         await cb(event)
 
 
-async def _guarded_message(cb: OnMessageCallback, open_id: str, text: str) -> None:
+async def _guarded_message(cb: OnMessageCallback, open_id: str, text: str, message_id: str) -> None:
     async with _msg_sem:
-        await cb(open_id, text)
+        await cb(open_id, text, message_id)
+
+
+async def _guarded_card_action(cb: OnCardActionCallback, open_id: str, value: dict) -> None:
+    try:
+        await cb(open_id, value)
+    except Exception as e:
+        logger.error("Card action handler error: %s", e)
 
 
 def _handle_meeting_end(event: dict, cb: OnMeetingEndCallback) -> None:
@@ -48,6 +56,18 @@ def _handle_meeting_end(event: dict, cb: OnMeetingEndCallback) -> None:
     _seen_meetings[meeting_id] = now_ts
     logger.info("Meeting ended: %s", meeting_id)
     asyncio.create_task(_guarded_meeting(cb, event))
+
+
+def _handle_card_action(event: dict, cb: OnCardActionCallback) -> None:
+    operator = event.get("event", {}).get("operator", {})
+    open_id = operator.get("open_id", "")
+    if not open_id:
+        return
+    action_value = event.get("event", {}).get("action", {}).get("value", {})
+    if not action_value:
+        return
+    logger.info("Card action from %s: %s", open_id, action_value)
+    asyncio.create_task(_guarded_card_action(cb, open_id, action_value))
 
 
 def _handle_im_message(event: dict, cb: OnMessageCallback) -> None:
@@ -81,7 +101,7 @@ def _handle_im_message(event: dict, cb: OnMessageCallback) -> None:
         return
 
     logger.info("DM from %s: %s", open_id, text[:80])
-    asyncio.create_task(_guarded_message(cb, open_id, text))
+    asyncio.create_task(_guarded_message(cb, open_id, text, message_id))
 
 
 async def _drain_stderr(proc: asyncio.subprocess.Process) -> None:
@@ -98,14 +118,15 @@ async def _drain_stderr(proc: asyncio.subprocess.Process) -> None:
 async def listen_all_events(
     on_meeting_end: OnMeetingEndCallback,
     on_dm_message: OnMessageCallback,
+    on_card_action: OnCardActionCallback | None = None,
 ) -> None:
     """
-    Single lark-cli subscriber that dispatches to both meeting-end and DM-message
-    handlers.  Reconnects automatically on failure.
+    Single lark-cli subscriber that dispatches to meeting-end, DM-message,
+    and card-action handlers.  Reconnects automatically on failure.
     """
     while True:
         logger.info("Starting unified lark event subscription...")
-        proc = await stream_lark_events(as_identity="bot")
+        proc = await stream_lark_events(as_identity="bot", force=True)
         asyncio.create_task(_drain_stderr(proc))
 
         try:
@@ -127,6 +148,8 @@ async def listen_all_events(
                     _handle_meeting_end(event, on_meeting_end)
                 elif "im.message.receive" in event_type:
                     _handle_im_message(event, on_dm_message)
+                elif "card.action.trigger" in event_type and on_card_action:
+                    _handle_card_action(event, on_card_action)
 
         except Exception as e:
             logger.error("Event dispatcher error: %s", e)

@@ -17,13 +17,38 @@ from app.workflow_premeet.im_context_service import (
 )
 from app.workflow_premeet.context_synthesizer import synthesize_brief
 from app.workflow_premeet.card_builder import build_brief_card
+import app.persistence as db
 
 logger = logging.getLogger(__name__)
 
-# In-memory dict of already-pushed keys → meeting start_time, for dedup and GC
+# In-memory dict of already-pushed keys → meeting start_time, backed by SQLite for persistence.
 _pushed_events: dict[str, datetime] = {}
 
 _PUSHED_EVENTS_TTL = timedelta(hours=2)  # clean up keys this long after meeting start
+
+
+def _load_pushed_events() -> None:
+    """Populate _pushed_events from DB on startup (skips already-expired keys)."""
+    db.init_db()
+    now = datetime.now(tz=timezone.utc)
+    raw = db.pushed_events_load()
+    expired: list[str] = []
+    for key, start_iso in raw.items():
+        try:
+            start_time = datetime.fromisoformat(start_iso)
+        except ValueError:
+            expired.append(key)
+            continue
+        if now - start_time > _PUSHED_EVENTS_TTL:
+            expired.append(key)
+        else:
+            _pushed_events[key] = start_time
+    db.pushed_events_delete(expired)
+    if _pushed_events:
+        logger.info("Loaded %d pushed_events from DB", len(_pushed_events))
+
+
+_load_pushed_events()
 
 
 def _push_key(event_id: str) -> str:
@@ -34,6 +59,7 @@ def _gc_pushed_events(now: datetime) -> None:
     expired = [k for k, start in _pushed_events.items() if now - start > _PUSHED_EVENTS_TTL]
     for k in expired:
         del _pushed_events[k]
+    db.pushed_events_delete(expired)
     if expired:
         logger.debug("GC: removed %d expired push keys", len(expired))
 
@@ -60,6 +86,7 @@ async def premeet_check_job() -> None:
 
         if timedelta(0) < time_until_start <= push_threshold and key not in _pushed_events:
             _pushed_events[key] = event.start_time
+            db.pushed_events_put(key, event.start_time.isoformat())
             logger.info("Triggering pre-meeting push for: %s", event.title)
             asyncio.create_task(_run_premeet_pipeline(event))
 

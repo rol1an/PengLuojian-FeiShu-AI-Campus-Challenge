@@ -1,13 +1,16 @@
+import asyncio
 import json
 import logging
 import re
+import time
 from datetime import timezone, timedelta
 
 from app.exceptions import LLMError
 from app.lark import run_lark
 from app.llm import call_llm
 from app.models import CalendarEvent, MeetingBrief
-from app.workflow_qa.context_store import context_store
+from app.workflow_qa.context_store import context_store, QATurn
+from app.workflow_qa.qa_log import QARecord, new_qa_id, log_qa, log_feedback
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +37,7 @@ _QA_SYSTEM_PROMPT = """\
 3. 不使用 Markdown 符号（# * ** 等），纯文本格式
 4. 不超过 150 字，信息少时一句话即可
 5. 如果上下文中确实找不到，直接说"这块我这边没有相关记录"
+6. 如有对话历史，自然衔接，不重复解释已说过的内容；可用"如前所述..."简短引用
 
 示例（仅参考风格，不要照抄内容）：
 Cat A 直接命中型会议召回率最高，Hit@3 达到 100%，主要原因是标题含有具体项目名或工具名 (https://example.feishu.cn/wiki/xxx)。据与程俊华的沟通，他也建议把标题写得具体一些。\
@@ -200,6 +204,45 @@ def _extract_relevant_sections(
     return "\n\n".join(result_parts)
 
 
+_LLM_HISTORY_TURNS = 3  # fixed: only last 3 turns sent to LLM
+
+# Pronouns that indicate the question refers to something from a previous turn
+_CONTEXT_PRONOUN_RE = re.compile(r'[这那此该它]\w{0,2}')
+
+
+def _augment_search_query(question: str, history: list[QATurn]) -> str:
+    """Expand a context-dependent question with key terms from the previous turn.
+
+    When a question contains pronouns like 这个/该/它 that refer to something
+    said earlier, retrieval fails because there are no specific nouns to match.
+    Appending terms from the last question gives the search step enough signal.
+    The original question is still sent to the LLM unchanged.
+    """
+    if not history or not _CONTEXT_PRONOUN_RE.search(question):
+        return question
+    prev_terms = _extract_terms(history[-1].question)
+    if not prev_terms:
+        return question
+    # Pick the longest (most discriminative) terms, up to 4
+    extra = " ".join(sorted(prev_terms, key=len, reverse=True)[:4])
+    augmented = f"{question} {extra}"
+    logger.debug("search_query augmented: '%s' → '%s'", question[:40], augmented[:60])
+    return augmented
+
+
+def _build_history_block(history: list[QATurn]) -> str:
+    """Format the last N conversation turns for injection into the LLM prompt."""
+    if not history:
+        return ""
+    from datetime import datetime
+    lines = ["# 本场会议对话历史（最近几轮，回答时自然衔接）"]
+    for turn in history[-_LLM_HISTORY_TURNS:]:
+        t = datetime.fromtimestamp(turn.ts, tz=_CST).strftime("%H:%M")
+        lines.append(f"[{t}] 用户：{turn.question}")
+        lines.append(f"[{t}] 助手：{turn.answer[:200]}")
+    return "\n".join(lines)
+
+
 # ---------------------------------------------------------------------------
 # Context building
 # ---------------------------------------------------------------------------
@@ -304,13 +347,187 @@ async def _live_search_for_question(question: str, meeting_title: str) -> str:
         return ""
 
 
-async def _ask_llm(event: CalendarEvent, brief: MeetingBrief, question: str) -> str:
+async def _enrich_key_docs(brief: MeetingBrief, question: str) -> str:
+    """Fetch full content of brief.key_docs and extract relevant sections.
+
+    Used as fallback when live wiki search returns no results (e.g. phrasing mismatch).
+    """
+    if not brief.key_docs:
+        return ""
+    try:
+        from app.workflow_premeet.doc_enricher import _fetch_doc_content
+    except Exception:
+        return ""
+
+    lines = ["# 关键参考文档详细内容（从会前简报）"]
+    fetched = 0
+    for doc in brief.key_docs[:3]:
+        if not doc.obj_token:
+            continue
+        link = doc.anchor_url or doc.url
+        lines.append(f"\n## 文档：{doc.title}")
+        lines.append(f"链接：{link}")
+        try:
+            full_text = await _fetch_doc_content(doc.obj_token)
+            snippet = _extract_relevant_sections(
+                full_text, question, max_chars=3000, doc_title=doc.title
+            )
+            if snippet:
+                lines.append(f"文档内容节选：\n{snippet}")
+                fetched += 1
+        except Exception as e:
+            logger.debug("_enrich_key_docs failed for doc '%s': %s", doc.title, e)
+            if doc.key_conclusions:
+                lines.append(f"关键结论：{'；'.join(doc.key_conclusions)}")
+
+    if fetched == 0:
+        return ""
+    logger.info("_enrich_key_docs: fetched %d docs for question '%s'", fetched, question[:40])
+    return "\n".join(lines)
+
+
+async def _ask_llm(
+    event: CalendarEvent,
+    brief: MeetingBrief,
+    question: str,
+    history: list[QATurn] | None = None,
+) -> tuple[str, dict]:
+    """Call LLM and return (reply, meta).
+
+    meta keys:
+      path           — "live_search" | "key_docs_fallback" | "brief_only"
+      context_chars  — total chars of context passed to LLM
+      context_snippet — first 1500 chars of context (for LLM judge)
+    """
+    meta: dict = {"path": "brief_only", "context_chars": 0, "context_snippet": ""}
+
     context_block = _build_context_block(event, brief)
-    live_search = await _live_search_for_question(question, event.title)
+
+    # Expand context-dependent queries (pronouns) with terms from previous turn
+    search_query = _augment_search_query(question, history or [])
+
+    live_search = await _live_search_for_question(search_query, event.title)
+
     if live_search:
         context_block += f"\n\n{live_search}"
-    user_message = f"{context_block}\n---\n用户问题：{question}"
-    return await call_llm(_QA_SYSTEM_PROMPT, user_message, temperature=0.3)
+        meta["path"] = "live_search"
+    else:
+        key_doc_enriched = await _enrich_key_docs(brief, search_query)
+        if key_doc_enriched:
+            context_block += f"\n\n{key_doc_enriched}"
+            meta["path"] = "key_docs_fallback"
+
+    # Append conversation history (last 3 turns only)
+    history_block = _build_history_block(history or [])
+    if history_block:
+        context_block += f"\n\n{history_block}"
+
+    meta["context_chars"] = len(context_block)
+    meta["context_snippet"] = context_block[:1500]
+
+    # Prepend meeting identity so the LLM is grounded to the right meeting
+    start_cst = event.start_time.astimezone(_CST).strftime("%Y-%m-%d %H:%M")
+    meeting_identity = (
+        f"[当前会议：{event.title}｜开始：{start_cst}｜event_id：{event.event_id}]\n\n"
+    )
+    user_message = f"{meeting_identity}{context_block}\n---\n用户问题：{question}"
+    reply = await call_llm(_QA_SYSTEM_PROMPT, user_message, temperature=0.3)
+    return reply, meta
+
+
+# ---------------------------------------------------------------------------
+# Feedback card
+# ---------------------------------------------------------------------------
+
+def _build_feedback_card(qa_id: str) -> dict:
+    return {
+        "config": {"wide_screen_mode": False},
+        "elements": [
+            {
+                "tag": "div",
+                "text": {"tag": "plain_text", "content": "这条回答对您有帮助吗？"},
+            },
+            {
+                "tag": "action",
+                "actions": [
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "👍 有帮助"},
+                        "type": "primary",
+                        "value": {"action": "qa_feedback", "rating": "good", "qa_id": qa_id},
+                    },
+                    {
+                        "tag": "button",
+                        "text": {"tag": "plain_text", "content": "👎 没帮助"},
+                        "type": "default",
+                        "value": {"action": "qa_feedback", "rating": "bad", "qa_id": qa_id},
+                    },
+                ],
+            },
+        ],
+    }
+
+
+async def _send_feedback_card(open_id: str, qa_id: str) -> None:
+    try:
+        card = _build_feedback_card(qa_id)
+        await run_lark(
+            "im", "+messages-send",
+            "--user-id", open_id,
+            "--msg-type", "interactive",
+            "--content", json.dumps(card, ensure_ascii=False),
+            as_identity="bot",
+            no_format=True,
+        )
+    except Exception as e:
+        logger.debug("Failed to send feedback card to %s: %s", open_id, e)
+
+
+# ---------------------------------------------------------------------------
+# Card action handler (called by event_dispatcher)
+# ---------------------------------------------------------------------------
+
+async def handle_card_action(operator_open_id: str, action_value: dict) -> None:
+    """Handle interactive card button clicks."""
+    if action_value.get("action") != "qa_feedback":
+        return
+
+    qa_id = action_value.get("qa_id", "")
+    rating = action_value.get("rating", "")
+    if not qa_id or rating not in ("good", "bad"):
+        return
+
+    log_feedback(qa_id, operator_open_id, rating)
+
+    ack = "感谢反馈，已记录！" if rating == "good" else "收到，感谢反馈！"
+    try:
+        await run_lark(
+            "im", "+messages-send",
+            "--user-id", operator_open_id,
+            "--msg-type", "text",
+            "--content", json.dumps({"text": ack}, ensure_ascii=False),
+            as_identity="bot",
+            no_format=True,
+        )
+    except Exception as e:
+        logger.debug("Failed to send feedback ack to %s: %s", operator_open_id, e)
+
+
+# ---------------------------------------------------------------------------
+# Lark helpers
+# ---------------------------------------------------------------------------
+
+async def _add_reaction(message_id: str, emoji_type: str = "Typing") -> None:
+    """Add an emoji reaction to a message to signal the bot received it."""
+    try:
+        await run_lark(
+            "im", "reactions", "create",
+            "--params", json.dumps({"message_id": message_id}),
+            "--data", json.dumps({"reaction_type": {"emoji_type": emoji_type}}),
+            as_identity="bot",
+        )
+    except Exception as e:
+        logger.debug("Failed to add reaction to %s: %s", message_id, e)
 
 
 async def _send_text_reply(open_id: str, text: str) -> None:
@@ -327,8 +544,15 @@ async def _send_text_reply(open_id: str, text: str) -> None:
         logger.error("Failed to send Q&A reply to %s: %s", open_id, e)
 
 
-async def handle_user_message(sender_open_id: str, text: str) -> None:
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
+
+async def handle_user_message(sender_open_id: str, text: str, message_id: str = "") -> None:
     """Entry point called by message_listener for each incoming DM."""
+    if message_id:
+        asyncio.create_task(_add_reaction(message_id))
+
     entry = context_store.get(sender_open_id)
 
     if entry is None:
@@ -336,14 +560,39 @@ async def handle_user_message(sender_open_id: str, text: str) -> None:
         await _send_text_reply(sender_open_id, _NO_CONTEXT_REPLY)
         return
 
+    qa_id = new_qa_id()
+    reply = _ERROR_REPLY
+    meta: dict = {"path": "brief_only", "context_chars": 0, "context_snippet": ""}
+
     try:
-        reply = await _ask_llm(entry.event, entry.brief, text)
+        reply, meta = await _ask_llm(entry.event, entry.brief, text, history=entry.history)
         logger.info(
-            "Q&A answered for %s (event=%s): %s",
-            sender_open_id, entry.event.event_id, reply[:60],
+            "QA_ANSWERED user=%s event=%s path=%s ctx_chars=%d history_turns=%d reply='%s'",
+            sender_open_id, entry.event.event_id,
+            meta["path"], meta["context_chars"], len(entry.history), reply[:60],
         )
     except LLMError as e:
         logger.error("LLM error for Q&A (user=%s): %s", sender_open_id, e)
-        reply = _ERROR_REPLY
 
     await _send_text_reply(sender_open_id, reply)
+
+    if reply != _ERROR_REPLY:
+        # Layer 1: structured log
+        log_qa(QARecord(
+            qa_id=qa_id,
+            ts=time.time(),
+            user_open_id=sender_open_id,
+            event_id=entry.event.event_id,
+            event_title=entry.event.title,
+            question=text,
+            reply=reply,
+            path=meta["path"],
+            context_chars=meta["context_chars"],
+            context_snippet=meta["context_snippet"],
+        ))
+
+        # Persist this turn to memory for future questions in the same meeting
+        context_store.append_turn(sender_open_id, text, reply)
+
+        # Layer 2 (feedback card) disabled: requires a public HTTPS Card Request URL
+        # configured in the Feishu app settings. Re-enable when deploying to a server.

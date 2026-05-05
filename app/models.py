@@ -54,6 +54,8 @@ class WikiDoc:
     open_questions: list[str] = field(default_factory=list)
     anchor_url: str = ""
     obj_edit_time: str = ""   # unix timestamp string, for recency comparison
+    owner: str = ""
+    obj_type: str = ""
     task_background: str = ""
     how_to_solve: str = ""
     related_parties: str = ""
