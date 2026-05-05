@@ -40,9 +40,11 @@
 收到「会前同步卡」后，可在机器人私聊中直接追问会议相关问题。助手会实时从知识库检索相关文档，结合近期私聊/群聊记录给出回答，并内联注明来源（文档附链接，私聊说联系人）。
 
 **核心机制**：
-- **章节级精准检索**：对文档按标题切分章节，用问题关键词打分，只取最相关的章节（≤ 3000 字）传入 LLM，避免长文档被位置截断截掉关键内容
+- **章节级精准检索**：对文档按多格式标题（`##`/`一、`/`1.`/`（一）`）切分章节，提取问题关键词（英文整词 + 中文 2/3/4-gram，过滤高频泛化词），对每个章节按标题命中 3× 权重 + 正文命中打分，首节强制保留（背景信息），贪心填充至 3000 字上限，避免长文档位置截断丢失关键章节
+- **多轮对话记忆**：每轮问答写入 history（MAX 10 轮），LLM 注入最近 3 轮 + 会议身份前缀，回答自然衔接，不重复解释已说过内容
+- **代词查询增强**：检测问题含代词（这/该/它），自动从上一轮问题提取最有判别力的词扩充检索 query，修复「设置这个机制的原因」类 0 命中问题，LLM 仍收到原始问题
 - **来源可追溯**：文档来源自动附链接，私聊来源注明联系人姓名，群聊来源注明群名
-- **自然汇报风格**：回答遵循「先结论→再来源→最后收口」的隐含顺序，而非固定结构化模板
+- **自然汇报风格**：回答遵循「先结论→再来源→最后收口」的隐含顺序，150 字以内，禁用 Markdown 符号，来源内联不分区块
 
 ![Q&A 会议助手](picture_data/Q&AAgent.png)
 
@@ -179,9 +181,11 @@ curl -X POST http://localhost:8080/debug/trigger-postmeet \
 After receiving the briefing card, attendees can ask follow-up questions directly in the bot's DM chat. The assistant performs real-time wiki search, combines knowledge base results with recent chat history, and replies with inline source attribution.
 
 **How it works**:
-- **Section-level retrieval**: Splits documents by heading, scores each section against the question's keywords, and passes only the most relevant sections (≤ 3,000 chars) to the LLM — ensuring long documents don't get truncated before the relevant part
+- **Section-level retrieval**: Splits documents by heading (`##` / `一、` / `1.` / `（一）`), extracts discriminative terms from the question (whole English tokens + Chinese 2/3/4-gram, filtering generic stopwords), scores each section (title hit ×3 + body hit), forces the first section to always be included (background context), then greedily fills up to 3,000 chars — ensuring late sections are never silently dropped by positional truncation
+- **Multi-turn memory**: Each Q&A turn is appended to a per-user history (MAX 10 turns); the LLM receives the last 3 turns plus a meeting identity prefix, enabling natural follow-up without repeating prior context
+- **Pronoun query expansion**: Detects pronouns (这/该/它) in the question and appends the most discriminative terms from the previous turn to the retrieval query (LLM still sees the original question) — fixing zero-hit cases like "why was this mechanism introduced?"
 - **Traceable sources**: Document sources include clickable links; DM sources name the contact; group chat sources name the group
-- **Natural reporting style**: Answers follow an implicit order — conclusion first, then source attribution, then a closing remark — rather than a rigid templated format
+- **Natural reporting style**: Answers follow an implicit order — conclusion first, then inline source attribution, then a closing remark — max 150 chars, no Markdown symbols
 
 ![Q&A Meeting Assistant](picture_data/Q&AAgent.png)
 
@@ -225,10 +229,13 @@ Feishu Calendar (APScheduler polling, triggers 25 min before meeting)
 Workflow 2 · In-meeting Q&A
 User sends a question in bot DM (im.message event listener)
   → Load pre-meeting brief from context_store (TTL 4h)
-  → Real-time wiki search (question as keyword)
-       → Section-level extraction (split by heading → keyword scoring → top sections ≤ 3,000 chars)
-  → Merge pre-meeting brief + live search results
-  → LLM generates natural-language reply (conclusion → inline sources → closing)
+  → Pronoun detection → augment search query with terms from previous turn (if needed)
+  → Real-time wiki search (augmented query)
+       → Section-level extraction (split by heading → keyword scoring title×3 + body → force first section → greedy fill ≤ 3,000 chars)
+       → Fallback: enrich key_docs from brief if live search returns nothing
+  → Inject last 3 conversation turns + meeting identity prefix
+  → LLM generates natural-language reply (conclusion → inline sources → closing, ≤ 150 chars)
+  → Append turn to history (MAX 10 turns)
 
 Workflow 3 · Post-meeting Processing
 Feishu vc.meeting.end event (WebSocket listener)
