@@ -76,8 +76,12 @@
       ├─ 会议群聊上下文（近 7 天）
       └─ 知识库文档
             → LLM 关键词提取
-            → docs +search 全文搜索（含标题滑窗兜底）
-            → 质量过滤（时效 / 类型 / 标题 / 发起人加成）
+            → 混合召回（并行双路）
+                ├─ 全文路：docs +search（LLM 关键词 + 标题滑窗兜底）
+                └─ 向量路：Doubao-Embedding-Vision 离线索引（90天内文档预分块嵌入，
+                           docx 800/100、slides 500/50、sheet 300/0，带标题前缀）
+                           → embed_query 实时向量化 → max-pool 余弦召回 top-5 补充
+            → Layer 1 质量过滤（时效 / 类型 / owner / 标题，阈值 0.3）
             → 版本去重（正则识别 v1/v2、第一版/第二版、①②、1️⃣2️⃣ 等，保留最高版本）
             → LLM 语义精排（0-10 分）
             → LLM 内容去重（跨知识库相同内容只留最新版）
@@ -106,6 +110,9 @@
 | 组件 | 技术 |
 |------|------|
 | LLM | 豆包 2.0（Volcengine Ark，OpenAI 兼容接口）|
+| Embedding | Doubao-Embedding-Vision（2048 维，httpx 并发调用，独立 API Key）|
+| 向量索引 | 纯 Python cosine（struct pack/unpack）+ SQLite BLOB 持久化，max-pool 多 chunk 聚合 |
+| 持久化 | SQLite（pushed_events / qa_context / doc_index / doc_embeddings 四表）|
 | 飞书能力 | lark-cli（日历 / IM / Wiki / 任务 / 视频会议）|
 | 服务框架 | FastAPI + APScheduler |
 | 运行环境 | Python 3.11+，uvicorn |
@@ -217,8 +224,12 @@ Feishu Calendar (APScheduler polling, triggers 25 min before meeting)
       ├─ Meeting group chat context (last 7 days)
       └─ Knowledge base docs
             → LLM keyword extraction
-            → docs +search full-text search (with sliding-window title fallback)
-            → Quality filter (recency / type / title / organizer boost)
+            → Hybrid recall (two paths in parallel)
+                ├─ Full-text path: docs +search (LLM keywords + sliding-window title fallback)
+                └─ Vector path: Doubao-Embedding-Vision offline index (docs updated within 90 days,
+                                pre-chunked with title prefix — docx 800/100, slides 500/50, sheet 300/0)
+                                → embed_query at query time → max-pool cosine, top-5 extra docs
+            → Layer 1 quality filter (recency / type / owner / title, threshold 0.3)
             → Version dedup (regex strips v1/v2, 第一版/第二版, ①②, 1️⃣2️⃣ etc.; keeps highest version)
             → LLM semantic reranking (0-10 score)
             → LLM content dedup (keep newest copy across knowledge spaces)
@@ -250,6 +261,9 @@ Feishu vc.meeting.end event (WebSocket listener)
 | Component | Technology |
 |-----------|-----------|
 | LLM | Doubao 2.0 (Volcengine Ark, OpenAI-compatible) |
+| Embedding | Doubao-Embedding-Vision (2048-dim, concurrent httpx calls, separate API key) |
+| Vector index | Pure-Python cosine (struct pack/unpack) + SQLite BLOB persistence, max-pool multi-chunk aggregation |
+| Persistence | SQLite (pushed_events / qa_context / doc_index / doc_embeddings) |
 | Feishu APIs | lark-cli (Calendar / IM / Wiki / Task / VC) |
 | Service | FastAPI + APScheduler |
 | Runtime | Python 3.11+, uvicorn |
