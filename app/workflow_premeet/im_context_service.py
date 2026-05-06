@@ -196,6 +196,7 @@ async def get_group_messages(
     days: int | None = None,
     name_map: dict[str, str] | None = None,
     keywords: list[str] | None = None,
+    chat_name: str = "",
 ) -> list[ChatMessage]:
     """Fetch recent group chat messages.
 
@@ -208,7 +209,7 @@ async def get_group_messages(
             return await _search_group_by_keywords(keywords, days, name_map or {})
         return []
     try:
-        messages = await _fetch_recent_messages(chat_id, days, source="group", name_map=name_map or {})
+        messages = await _fetch_recent_messages(chat_id, days, source="group", name_map=name_map or {}, chat_name=chat_name)
         return messages[: settings.IM_CONTEXT_MAX_MESSAGES]
     except Exception as e:
         logger.debug("get_group_messages failed for chat %s: %s", chat_id, e)
@@ -259,6 +260,24 @@ async def _search_group_by_keywords(
     # Pick the group with the most keyword hits
     best_chat_id = max(chat_hit_count, key=lambda c: chat_hit_count[c])
     best_chat_name = chat_name_map.get(best_chat_id, "")
+
+    # Resolve chat name via +chat-search if probe didn't return one
+    if not best_chat_name:
+        try:
+            chat_info = await run_lark(
+                "im", "+chat-search",
+                "--query", keywords[0][:20] if keywords else " ",
+                "--page-size", "10",
+                as_identity="user",
+                timeout=15,
+            )
+            for c in chat_info.get("data", {}).get("chats", []):
+                if c.get("chat_id") == best_chat_id:
+                    best_chat_name = c.get("name", "")
+                    break
+        except Exception as e:
+            logger.debug("Failed to resolve chat name for %s: %s", best_chat_id, e)
+
     logger.info(
         "Group chat discovered via keyword search: '%s' (chat_id=%s, hits=%d)",
         best_chat_name, best_chat_id, chat_hit_count[best_chat_id],
@@ -267,6 +286,7 @@ async def _search_group_by_keywords(
     try:
         messages = await _fetch_recent_messages(
             best_chat_id, days, source="group", name_map=name_map,
+            chat_name=best_chat_name,
         )
         for m in messages:
             if not m.chat_name:
@@ -280,6 +300,7 @@ async def _search_group_by_keywords(
 
 async def _fetch_recent_messages(
     chat_id: str, days: int, source: str, name_map: dict[str, str] | None = None,
+    chat_name: str = "",
 ) -> list[ChatMessage]:
     """Fetch messages from a chat within the past N days."""
     start_iso = (datetime.now(tz=timezone.utc) - timedelta(days=days)).isoformat()
@@ -322,6 +343,7 @@ async def _fetch_recent_messages(
                 timestamp=ts,
                 chat_id=chat_id,
                 source=source,
+                chat_name=chat_name,
             )
         )
     messages.sort(key=lambda m: m.timestamp, reverse=True)

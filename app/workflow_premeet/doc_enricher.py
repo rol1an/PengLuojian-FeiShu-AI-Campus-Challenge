@@ -47,14 +47,18 @@ Rules:
 
 
 async def enrich_docs_inplace(docs: list[WikiDoc], meeting_title: str) -> None:
-    """Enrich top docs in-place (fill why_relevant / conclusions / questions). No pushing."""
+    """Enrich top docs in-place (fill why_relevant / conclusions / questions). No pushing.
+
+    Calls LLM sequentially with a small delay to avoid hitting rate limits.
+    """
     if not docs:
         return
-    tasks = [_enrich_one(doc, meeting_title) for doc in docs]
-    results = await asyncio.gather(*tasks, return_exceptions=True)
-    for doc, result in zip(docs, results):
-        if isinstance(result, Exception):
-            logger.debug("Enrichment skipped for '%s': %s", doc.title, result)
+    for doc in docs:
+        try:
+            await _enrich_one(doc, meeting_title)
+        except Exception as e:
+            logger.warning("Enrichment failed for '%s': %s", doc.title, e)
+        await asyncio.sleep(1.5)  # avoid Doubao TPM rate limit
 
 
 async def enrich_and_repush(

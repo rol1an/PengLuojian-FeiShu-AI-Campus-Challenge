@@ -123,7 +123,10 @@ class MeetingContextStore:
             inserted_at=time.monotonic(),
         )
         self._created_at[open_id] = now_wall
-        db.qa_context_put(open_id, _serialize_event(event), _serialize_brief(brief), now_wall)
+        try:
+            db.qa_context_put(open_id, _serialize_event(event), _serialize_brief(brief), now_wall)
+        except Exception as e:
+            logger.warning("qa_context_put failed for %s (in-memory OK): %s", open_id, e)
 
     def append_turn(self, open_id: str, question: str, answer: str) -> None:
         """Append a Q&A turn to the conversation history for open_id."""

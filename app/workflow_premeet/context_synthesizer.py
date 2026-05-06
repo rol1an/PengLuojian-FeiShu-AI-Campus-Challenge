@@ -120,10 +120,19 @@ async def synthesize_brief(
                     t = sel.get("time", "")
                     is_dm = sel.get("source") == "dm"
                     if is_dm:
-                        name = _best_name(sel.get("chat_name", ""), sel.get("sender_name", ""))
+                        name = sel.get("chat_name", "")
+                        if not name or _PLACEHOLDER_RE.match(name):
+                            name = ""
                         source_label = f"{t}与{name}（私聊）" if name else f"{t}（私聊）"
                     else:
-                        name = _best_name(sel.get("sender_name", ""), sel.get("chat_name", ""))
+                        group_name = sel.get("chat_name", "")
+                        sender = sel.get("sender_name", "")
+                        if group_name and not _PLACEHOLDER_RE.match(group_name):
+                            name = f"{sender}@{group_name}" if sender and not _PLACEHOLDER_RE.match(sender) else group_name
+                        elif sender and not _PLACEHOLDER_RE.match(sender):
+                            name = sender
+                        else:
+                            name = ""
                         source_label = f"{t}来自{name}（群聊）" if name else f"{t}（群聊）"
                 if text:
                     context_bullets.append(ContextBullet(text=text, source_label=source_label))
@@ -136,10 +145,19 @@ async def synthesize_brief(
                 if not text:
                     continue
                 if is_dm:
-                    name = _best_name(sel.get("chat_name", ""), sel.get("sender_name", ""))
+                    name = sel.get("chat_name", "")
+                    if not name or _PLACEHOLDER_RE.match(name):
+                        name = ""
                     source_label = f"{t}与{name}（私聊）" if name else f"{t}（私聊）"
                 else:
-                    name = _best_name(sel.get("sender_name", ""), sel.get("chat_name", ""))
+                    group_name = sel.get("chat_name", "")
+                    sender = sel.get("sender_name", "")
+                    if group_name and not _PLACEHOLDER_RE.match(group_name):
+                        name = f"{sender}@{group_name}" if sender and not _PLACEHOLDER_RE.match(sender) else group_name
+                    elif sender and not _PLACEHOLDER_RE.match(sender):
+                        name = sender
+                    else:
+                        name = ""
                     source_label = f"{t}来自{name}（群聊）" if name else f"{t}（群聊）"
                 context_bullets.append(ContextBullet(text=text, source_label=source_label))
 
